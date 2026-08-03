@@ -28,7 +28,8 @@ The security surface that matters is therefore: (1) what can be deleted,
 | Deletion safety | ❌ | 1 critical, 3 high |
 | Filesystem interop (memory safety) | ⚠️ | 1 medium, 1 low |
 | Cache / persistence | ⚠️ | 2 medium |
-| Build & signing | ⚠️ | 2 medium |
+| Sandbox detection | ⚠️ | 1 medium |
+| Build & signing | ✅ | 1 withdrawn (Hardened Runtime already on) |
 | Test suite | ❌ | does not compile upstream |
 | Network / credentials | ✅ | no network I/O, no credentials, no secrets |
 
@@ -148,12 +149,26 @@ was actually reclaimed. That figure is wrong whenever:
   a partial failure still throws, so those bytes are counted as *not* freed even
   though some were).
 
-**Fix applied:** deletion now defaults to `trashItem(at:resultingItemURL:)`, with
-a Settings toggle for permanent deletion (off by default). When trashing, the
-tray says "Moved to Trash" rather than claiming space was freed, because it
-wasn't until the Trash is emptied. `deleteAll()` also re-checks `ProtectedPaths`
+**Fix applied:** the user-facing default is now `trashItem(at:resultingItemURL:)`,
+with a Settings toggle for permanent deletion (off by default). When trashing,
+the tray says "Moved to Trash" rather than claiming space was freed — because it
+wasn't, until you empty it — and the host is told zero bytes were reclaimed so it
+cannot report a false gain. `deleteAll` also re-checks `ProtectedPaths`
 immediately before each removal, closing the window between collect-time and
 delete-time.
+
+One deliberate wrinkle: `deleteAll(using:)`'s *parameter* default stays
+`.permanent`, so the two existing deletion tests keep exercising the behaviour
+they were written for and keep running hermetically instead of filling your
+Trash on every test run. `CollectorBar` reads the preference and passes the mode
+explicitly, so the safe default applies everywhere a person is involved. No
+existing test was modified anywhere in this review.
+
+The stale-byte-count problem is *not* fully fixed — `freedBytes` still comes from
+the scan. It is now only ever labelled "freed" in the permanent-delete path,
+where it is at least the right kind of claim; making it exact would mean
+measuring each subtree again immediately before removal, which doubles the cost
+of a delete for a cosmetic number.
 
 ### H2. `Xcode Archives` listed as a safe-to-clear cache
 
@@ -286,22 +301,28 @@ validates `nameDataOffset` against two exact expected values, `28` or `40`.)
 
 **Fix applied:** added the lower bound.
 
-### M4. Hardened Runtime is off
+### M4. ~~Hardened Runtime is off~~ — withdrawn, it was already on
 
-**File:** `OpenDisk.xcodeproj/project.pbxproj` — no `ENABLE_HARDENED_RUNTIME` in any configuration.
+I initially reported this as a finding. It is wrong, and the error was mine: my
+first grep over `project.pbxproj` passed through `uniq -f2`, which discarded the
+`ENABLE_HARDENED_RUNTIME` lines before I saw them. Re-audited per configuration:
 
-Without it the process permits unsigned code injection (`DYLD_INSERT_LIBRARIES`,
-task-port attach). In a **non-sandboxed app holding Full Disk Access** that is
-the difference between "a bug lets something read your files" and "any local
-process can borrow this app's FDA". It also makes notarisation impossible, which
-matters if you ever want to run the build on a second Mac without
-right-click-Open.
+| Target | Config | Hardened Runtime |
+|---|---|---|
+| OpenDisk (direct) | Debug | **YES** |
+| OpenDisk (direct) | Release | **YES** |
+| OpenDisk MAS | Debug | no |
+| OpenDisk MAS | Release | no |
 
-Its severity is coupled to C1: Sparkle is the realistic vector that would want
-to inject into the app, and with Sparkle gone the exposure drops considerably.
-Still worth turning on.
+The build you will actually run — the non-sandboxed one holding Full Disk
+Access — already has Hardened Runtime enabled, so it already rejects
+`DYLD_INSERT_LIBRARIES` and task-port attach from unsigned code. The MAS target
+does not have it, which is correct: Hardened Runtime is a Developer ID
+distribution requirement, not an App Store one, and App Store builds get their
+protection from the sandbox instead.
 
-**Fix applied:** `ENABLE_HARDENED_RUNTIME = YES` on both app targets.
+**No change made.** Recording the withdrawal rather than deleting it, because a
+review that quietly drops a claim is harder to trust than one that corrects it.
 
 ### M5. Sandbox detection relies on an environment variable
 
@@ -319,9 +340,18 @@ unconditionally (`:111`) and every scan silently fail. Neither is a privilege
 escalation — the kernel enforces the sandbox regardless of what this flag says —
 so this is a correctness/robustness issue, not a boundary bypass.
 
-**Fix applied:** replaced with a code-signing query
-(`SecCodeCopySelfSigningInformation` → `com.apple.security.app-sandbox`
-entitlement), falling back to the environment variable if that fails.
+**Fix applied:** three signals, most trustworthy first —
+(1) the `com.apple.security.app-sandbox` entitlement read from our own code
+signature via `SecCodeCopySelf` + `SecCodeCopySigningInformation`;
+(2) whether `NSHomeDirectory()` has been redirected into
+`~/Library/Containers/…`, which reflects what the kernel did to the process
+rather than what its launcher claimed;
+(3) the environment variable, only if neither of the first two can answer.
+
+Signal (1) returns "don't know" rather than "not sandboxed" for a build with no
+entitlements in its signature — an unsigned or ad-hoc local build — which is why
+(2) exists. Verified: `ScanAccess.isSandboxed` is `false` in the non-sandboxed
+test runner (new test in `ScanAccessTests`).
 
 ---
 
