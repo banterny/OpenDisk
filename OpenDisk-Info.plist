@@ -2,12 +2,36 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-	<!-- Sparkle (website build). Merged into the generated Info.plist via
-	     INFOPLIST_FILE — the INFOPLIST_KEY_ build-setting mechanism only
-	     supports Xcode's own known keys, NOT custom ones like these. -->
-	<key>SUFeedURL</key>
-	<string>https://opendisk.app/appcast.xml</string>
-	<key>SUPublicEDKey</key>
-	<string>269Oo3e4gnIe1gwQ8c9XZNoHZp1JAG4ofd3Kad6+V5A=</string>
+	<!-- Merged into the generated Info.plist via INFOPLIST_FILE — the
+	     INFOPLIST_KEY_ build-setting mechanism only supports Xcode's own
+	     known keys, NOT custom ones like these.
+
+	     The Sparkle keys (SUFeedURL / SUPublicEDKey) that used to live here
+	     were removed with the Sparkle dependency: this fork updates by
+	     rebuilding from source, so the running binary is always the source
+	     you have read. See SECURITY-REVIEW.md, finding C1. -->
+
+	<!-- Private drag type for the Collector.
+	     The Collector's drop target decodes whatever payload it is handed
+	     into a list of paths to delete, so that payload's type must not be
+	     one any other app — or any file in Finder — can produce. The
+	     previous `public.json` is a system-wide type owned by every .json
+	     file on the machine, which would let an arbitrary dragged file
+	     decode straight into deletion candidates. This app-private type
+	     conforms to public.json, so the encoding is unchanged, but nothing
+	     else on the system advertises it. See SECURITY-REVIEW.md, H4. -->
+	<key>UTExportedTypeDeclarations</key>
+	<array>
+		<dict>
+			<key>UTTypeIdentifier</key>
+			<string>ideals.OpenDisk.collected-files</string>
+			<key>UTTypeDescription</key>
+			<string>OpenDisk Collected Files</string>
+			<key>UTTypeConformsTo</key>
+			<array>
+				<string>public.json</string>
+			</array>
+		</dict>
+	</array>
 </dict>
 </plist>
