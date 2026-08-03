@@ -376,6 +376,11 @@ struct FileTree: Sendable {
     /// Sibling order is preserved. O(n) in the node count.
     func compacted() -> FileTree {
         let reachable = reachabilityBitmap()
+        // A tree straight off a full scan has no garbage at all, and that is
+        // the common case — every non-incremental save would otherwise pay for
+        // a full O(n) rebuild with nothing to remove.
+        if !reachable.contains(false) { return self }
+
         var remapped = [NodeID](repeating: Self.noNode, count: nodes.count)
         var result = FileTree(rootName: names[0])
         result.nodes[0].size = nodes[0].size

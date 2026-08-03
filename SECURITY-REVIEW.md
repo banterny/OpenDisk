@@ -25,7 +25,7 @@ The security surface that matters is therefore: (1) what can be deleted,
 | Category | Status | Issues |
 |---|---|---|
 | Code integrity / updates | ❌ | 1 critical |
-| Deletion safety | ❌ | 1 critical, 3 high |
+| Deletion safety | ❌ | 1 critical, 4 high |
 | Filesystem interop (memory safety) | ⚠️ | 1 medium, 1 low |
 | Cache / persistence | ⚠️ | 2 medium |
 | Sandbox detection | ⚠️ | 1 medium |
@@ -108,18 +108,53 @@ So the entire protection set — home, `~/Library`, `/System`, `/Library`,
 `/Applications`, every user account — is bypassable by prefixing
 `/System/Volumes/Data`. Deleting that path deletes the real home folder.
 
-**Reachability:** `ScanEngine.resolveDataVolumeAlias` (`ScanEngine.swift:233-237`)
-deliberately constructs `"/System/Volumes/Data" + path` when a path is not
-visible at its normal location, so this prefix is a first-class citizen in the
-engine, not a hypothetical. Any path reaching the Collector with that prefix is
-unguarded.
+**Reachability — this is the important part, and it needs H4 to be read first.**
 
-**Fix applied:** `normalized()` now canonicalises with `resolvingSymlinksInPath`
-(which *does* collapse firmlinks — verified) and explicitly strips a leading
-`/System/Volumes/Data`, with the raw path also checked so a non-existent path
-that resolves to nothing is still caught. New tests in
-`OpenDiskTests/ProtectedPathsTests.swift` cover the firmlink, symlink and
-`/private` forms. No existing test was modified.
+In the ordinary flow this prefix does not reach the Collector on its own.
+`ScanEngine.resolveDataVolumeAlias` (`ScanEngine.swift:233-237`) does construct
+`"/System/Volumes/Data" + path`, but only for `scanPath`; `rootName` keeps the
+original, so `FileTree.path(of:)` emits normal paths. That route is weak.
+
+The real chain is **C2 combined with H4**:
+
+1. A crafted payload arrives on the drop target (H4 — `public.json` is a
+   system-wide type, so any dragged `.json` file or any application can supply
+   one) carrying `path = "/System/Volumes/Data/Users/alice"`.
+2. `ProtectedPaths.reason` returns `nil` (C2 — the guard doesn't know that name).
+3. `Collector.appendOne`'s `fileExists` check *passes*, because the path is real.
+4. The row appears in the tray showing the innocuous name `alice`.
+5. One confirmation dialog later, the home folder is permanently deleted.
+
+Neither finding is critical alone: C2 needs something to supply the unusual path,
+and H4's payload is normally stopped by the protection check. Together they form
+a complete path from "user drags a file into the app" to "home directory gone".
+Both are fixed, and either fix alone breaks the chain — which is why both were
+made rather than picking one.
+
+**Fix applied:** the guard now checks three forms of every path — the literal
+normalised one, the `resolvingSymlinksInPath` form (which *does* collapse
+firmlinks; verified directly), and, for a path that doesn't exist and so can't
+be resolved, the form with a leading `/System/Volumes/Data` stripped. Any one of
+them matching refuses the path. `normalized()` itself is unchanged and still
+string-only; the new work lives in `canonicalForms`/`canonical`.
+
+Resolution is memoised: `reason(for:)` now touches the filesystem, and
+`FileActionsMenu`/`FolderRowView` call `isProtected` while building each row's
+context menu, so an unmemoised version would cost one `realpath` per visible row
+per render pass.
+
+Five new tests in `ProtectedPathsTests`; 9 assertions fail against the original
+implementation and pass against this one. No existing test was modified.
+
+**I got this fix wrong once.** My first version applied the "is this on a system
+volume?" rule to *every* form including the literal one, which meant that under a
+scan rooted at the Data volume — precisely what the sandboxed build's open panel
+returns when the user picks "Macintosh HD — Data" — every row wore the
+`/System/Volumes/Data` prefix and *every deletion was refused*. Caught by adding
+the missing test in the other direction ("Data-prefixed ordinary files are still
+deletable", 4 failing assertions). The rule now runs once, against the resolved
+path only. Recorded because a guard that silently refuses everything is a real
+regression, not a harmless excess of caution.
 
 ---
 
@@ -402,13 +437,56 @@ rather than repair:
 - **Cache validation is genuinely careful**: format version, root path, and the
   volume's device ID must all match, so a reformatted disk at the same mount
   point cannot resurrect a stale tree (`ScanCache.swift:38-56`).
-- **Buffer parsing is bounds-checked throughout**, with only the one signed-offset
-  gap in M3. The `searchfs` record parser derives record shape from the name
-  offset and refuses anything unexpected rather than guessing.
+- **Buffer parsing is bounds-checked** in all three raw-pointer parsers I read in
+  full — `BulkDirectoryReader.parseRecord`, `CatalogSearch.parseBatch` and
+  `SearchIndex.sweep` — with only the one signed-offset gap in M3. The `searchfs`
+  parser derives record shape from the name offset and refuses anything
+  unexpected rather than guessing; `sweep`'s `memmem` walk is correctly bounded
+  by the offsets array, and its "a match can never straddle two names" argument
+  holds because names cannot contain NUL and a folded query cannot either.
 - **Concurrency is disciplined**: `Mutex`/`Atomic` from `Synchronization`, blocking
   syscalls kept off the cooperative pool by design, and an exactly-once
   continuation latch in `FSEventsChangeJournal` that correctly handles the
   HistoryDone-vs-timeout-vs-cancellation race.
+
+## Residual risk after the fixes
+
+What is deliberately still true of this fork, so you are not inferring it from
+scattered notes:
+
+- **`freedBytes` is still a scan-time figure**, not a measurement of what was
+  actually reclaimed. It is now only labelled "freed" on the permanent-delete
+  path, but it will still be wrong for a stale scan, for hard-linked content, and
+  for a partially failed directory removal (H1).
+- **`/Library/Caches` and `~/go/pkg/mod/cache` will partially fail** — the first
+  needs admin rights, the second is deliberately made read-only by Go. You will
+  see failures in the tray rather than a clean result (L5).
+- **`getattrlistbulk` errors are still swallowed** (L3), so a directory that
+  fails mid-read is reported as smaller than it is rather than as an error. This
+  is the safer direction for a scanner and is left alone.
+- **`ScanCache` still memory-maps** its cache file, so a file truncated by
+  another process while mapped would `SIGBUS` (L4). Local-only, narrow window.
+- **`~/.Trash` remains in the cleanable-cache catalogue.** Much less alarming now
+  that deletion defaults to trashing, but worth knowing it is there (L6).
+- **The scan cache is still attacker-writable** at
+  `~/Library/Caches/ideals.OpenDisk/ScanCache/`. The hang is fixed and paths that
+  can't be derived are dropped, but a process already running as you could still
+  make the app *display* misleading rows. Defending against that properly would
+  mean authenticating the cache file, which is disproportionate for a machine
+  where the attacker already has your privileges.
+
+## What I did not verify
+
+- **The Mac App Store build's sandboxed behaviour.** `isSandboxed` returning
+  `true` via the entitlement query cannot be exercised here — a sandboxed build
+  needs a provisioned MAS signing identity. Only the `false` path is tested. The
+  MAS target does compile and link in Release.
+- **A live Finder drag against the drop target** (H4). The finding is reasoned
+  from the declared UTI, and the fix is verified structurally instead: the
+  exported type is present in the built `Info.plist`, `UTType.openDiskCollectedFiles`
+  resolves without trapping, and `UTType.json` does not conform to it.
+- **Actual deletion of anything real.** All deletion testing used temporary
+  directories. I did not run the app against your disks.
 
 ## 🔧 Bug: the test suite does not compile
 
