@@ -134,20 +134,34 @@ final class Collector {
 
     struct Failure: Sendable { let path: String; let error: String }
     struct Result: Sendable {
+        /// Bytes the scan attributed to the removed items. When `mode` is
+        /// `.trash` these bytes are *not* reclaimed until the Trash is
+        /// emptied, so the UI must not present this as space freed.
         let freedBytes: Int64
         let deletedCount: Int
         let failures: [Failure]
+        /// How the items were removed, so callers can word the outcome
+        /// truthfully.
+        var mode: DeletionMode = .permanent
     }
 
-    /// PERMANENTLY deletes every collected item (matches the "deleted
-    /// forever" countdown and actually reclaims the space). Runs off the
-    /// main actor; successfully-removed items are pruned from the list.
+    /// How collected items are removed.
+    enum DeletionMode: String, Sendable {
+        /// `trashItem` — recoverable from Finder. Space is not reclaimed
+        /// until the Trash is emptied.
+        case trash
+        /// `removeItem` — an unlink. Reclaims space immediately; no undo.
+        case permanent
+    }
+
+    /// Removes every collected item. Runs off the main actor; successfully
+    /// removed items are pruned from the list.
     ///
-    /// To make deletion recoverable, swap `removeItem(atPath:)` for
-    /// `trashItem(at:resultingItemURL:)` — but note the Trash keeps
-    /// occupying space until it is emptied, so the "freed" figure would be
-    /// aspirational rather than real.
-    func deleteAll() async -> Result {
+    /// The default is `.permanent` so this method's behaviour matches its
+    /// name and its long-standing contract. The *user-facing* default is
+    /// `.trash` — `CollectorBar` reads the preference and passes it in — so a
+    /// mis-drag stays recoverable. See SECURITY-REVIEW.md, finding H1.
+    func deleteAll(using mode: DeletionMode = .permanent) async -> Result {
         let targets = items
         let total = targets.count
         var freed: Int64 = 0
@@ -161,9 +175,27 @@ final class Collector {
             deletionProgress = DeletionProgress(
                 currentName: file.name, completed: index, total: total, freedBytes: freed
             )
+            // Re-check immediately before removal, not only when the item was
+            // collected. The collection can sit for minutes while the user
+            // decides, and a path can become protected in between (a volume
+            // mounts at that point, a symlink is repointed). The check is
+            // microseconds against an irreversible operation.
+            if let reason = ProtectedPaths.reason(for: file.path) {
+                failures.append(Failure(path: file.path, error: "“\(file.name)” \(reason)"))
+                continue
+            }
             let failure = await Task.detached(priority: .userInitiated) { () -> String? in
-                do { try FileManager.default.removeItem(atPath: file.path); return nil }
-                catch { return error.localizedDescription }
+                do {
+                    switch mode {
+                    case .trash:
+                        try FileManager.default.trashItem(
+                            at: URL(fileURLWithPath: file.path), resultingItemURL: nil
+                        )
+                    case .permanent:
+                        try FileManager.default.removeItem(atPath: file.path)
+                    }
+                    return nil
+                } catch { return error.localizedDescription }
             }.value
             if let failure {
                 failures.append(Failure(path: file.path, error: failure))
@@ -176,8 +208,12 @@ final class Collector {
         let failed = Set(failures.map(\.path))
         items.removeAll { !failed.contains($0.path) }
         deletionProgress = nil
-        // Deleted files are gone — there's nothing left to undo back into.
+        // Removed files are gone from their old location — there's nothing
+        // left to undo back into. (Trashed items are recoverable from Finder,
+        // not from here.)
         undoStack.removeAll()
-        return Result(freedBytes: freed, deletedCount: deleted, failures: failures)
+        return Result(
+            freedBytes: freed, deletedCount: deleted, failures: failures, mode: mode
+        )
     }
 }
