@@ -48,7 +48,11 @@ enum CleanableCacheCatalog {
             // Developer tooling.
             Location(name: "Xcode DerivedData", path: home + "/Library/Developer/Xcode/DerivedData"),
             Location(name: "Xcode iOS DeviceSupport", path: home + "/Library/Developer/Xcode/iOS DeviceSupport"),
-            Location(name: "Xcode Archives", path: home + "/Library/Developer/Xcode/Archives"),
+            // NOT listed: ~/Library/Developer/Xcode/Archives. Archives hold the
+            // dSYMs for every build you have shipped; without them you cannot
+            // symbolicate crash reports from released versions, and they cannot
+            // be regenerated. That is user data, not a cache, and it breaks this
+            // catalogue's stated rule above. See SECURITY-REVIEW.md, finding H2.
             Location(name: "Playwright Browsers", path: home + "/.cache/ms-playwright"),
             Location(name: "Puppeteer Browsers", path: home + "/.cache/puppeteer"),
             // App / ML / browser caches.
