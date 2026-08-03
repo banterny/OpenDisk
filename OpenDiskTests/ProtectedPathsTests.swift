@@ -188,6 +188,19 @@ struct ProtectedPathsTests {
     }
 
     /// Canonicalisation must not start refusing ordinary files.
+    /// A scan rooted at the Data volume (Finder and Disk Utility both offer
+    /// "Macintosh HD — Data", and the sandboxed build's open panel will hand
+    /// back exactly that) produces rows whose paths keep the prefix. Those are
+    /// ordinary user files and must stay deletable.
+    @Test("Data-prefixed ordinary files are still deletable")
+    func dataPrefixedOrdinaryFilesAllowed() {
+        let data = "/System/Volumes/Data"
+        #expect(ProtectedPaths.reason(for: data + home + "/Downloads") == nil)
+        #expect(ProtectedPaths.reason(for: data + home + "/Downloads/thing.zip") == nil)
+        #expect(ProtectedPaths.reason(for: data + home + "/Library/Caches/Homebrew") == nil)
+        #expect(ProtectedPaths.reason(for: data + "/Library/Caches") == nil)
+    }
+
     @Test("canonicalisation does not over-block ordinary paths")
     func noOverBlocking() {
         #expect(ProtectedPaths.reason(for: home + "/Downloads/thing.zip") == nil)
