@@ -161,3 +161,122 @@ struct FileTreeTests {
         #expect(tree.size(of: FileTree.rootID) == 10)
     }
 }
+
+@Suite("FileTree hardening")
+struct FileTreeHardeningTests {
+
+    /// A serialized tree whose sibling chain forms a cycle. The deserializer
+    /// validates index *ranges*, not acyclicity, so a corrupted or truncated
+    /// cache file can produce one — and every walk over it must terminate.
+    /// See SECURITY-REVIEW.md, finding M1.
+    private func treeWithSiblingCycle() throws -> FileTree {
+        var tree = FileTree(rootName: "/")
+        let a = tree.addNode(name: "a", parent: FileTree.rootID, size: 1, isDirectory: false)
+        let b = tree.addNode(name: "b", parent: FileTree.rootID, size: 2, isDirectory: false)
+
+        // Rewrite the serialized nextSibling array so a -> b -> a.
+        var data = tree.serializedData()
+        let count = tree.nodeCount
+        // Layout: magic(4) + count(4) + sizes(8n) + parents(4n) + firstChildren(4n)
+        //         + nextSiblings(4n) + ...
+        let nextSiblingsOffset = 8 + 8 * count + 4 * count + 4 * count
+        func write(_ value: Int32, atNodeIndex index: Int) {
+            withUnsafeBytes(of: value) { raw in
+                let start = nextSiblingsOffset + 4 * index
+                data.replaceSubrange(start..<(start + 4), with: raw)
+            }
+        }
+        write(b, atNodeIndex: Int(a))
+        write(a, atNodeIndex: Int(b))
+        return try #require(FileTree(serializedData: data))
+    }
+
+    @Test("a sibling-chain cycle does not hang the size roll-up", .timeLimit(.minutes(1)))
+    func siblingCycleTerminates() throws {
+        var tree = try treeWithSiblingCycle()
+        tree.rollUpDirectorySizes()   // hung forever before the bound was added
+        #expect(tree.nodeCount == 3)
+    }
+
+    @Test("a sibling-chain cycle does not hang subtree adoption", .timeLimit(.minutes(1)))
+    func siblingCycleAdoptionTerminates() throws {
+        let corrupt = try treeWithSiblingCycle()
+        var destination = FileTree(rootName: "/dest")
+        // Adopt the node whose *child chain* is cyclic — the root here.
+        // Adopting one of its children would walk that child's (empty) chain
+        // and never reach the cycle at all.
+        destination.adoptSubtree(
+            from: corrupt, otherNode: FileTree.rootID, under: FileTree.rootID
+        )
+        #expect(destination.nodeCount > 1)
+    }
+
+    /// An unlinked node has no route to the root, so it has no path. Returning
+    /// a partial one would name a *different, existing* directory, and these
+    /// paths flow into the Collector. See SECURITY-REVIEW.md, finding L1.
+    @Test("path(of:) returns nil rather than a plausible wrong path")
+    func pathOfDetachedNodeIsNil() {
+        var tree = FileTree(rootName: "/Volumes/T")
+        let linked = tree.addNode(name: "Documents", parent: FileTree.rootID, size: 0, isDirectory: true)
+        let detached = tree.appendUnlinked(name: "orphan", size: 5, isDirectory: false)
+
+        #expect(tree.path(of: linked) == "/Volumes/T/Documents")
+        #expect(tree.path(of: detached) == nil)
+    }
+
+    /// Incremental updates orphan whole subtrees; serialization writes every
+    /// node, so without compaction the cache grows on every rescan.
+    /// See SECURITY-REVIEW.md, finding M2.
+    @Test("compaction drops orphaned nodes but preserves the live tree")
+    func compactionDropsGarbage() throws {
+        var tree = FileTree(rootName: "/Volumes/T")
+        let docs = tree.addNode(name: "Documents", parent: FileTree.rootID, size: 0, isDirectory: true)
+        tree.addNode(name: "keep.bin", parent: docs, size: 100, isDirectory: false)
+        let stale = tree.addNode(name: "Stale", parent: FileTree.rootID, size: 0, isDirectory: true)
+        tree.addNode(name: "gone-a.bin", parent: stale, size: 7, isDirectory: false)
+        tree.addNode(name: "gone-b.bin", parent: stale, size: 9, isDirectory: false)
+
+        // What an FSEvents splice does: unlink the subtree, leave it in place.
+        tree.removeChild(named: "Stale", of: FileTree.rootID)
+        #expect(tree.nodeCount == 6)   // orphans still occupy the arrays
+
+        let compacted = tree.compacted()
+        #expect(compacted.nodeCount == 3)   // root + Documents + keep.bin
+
+        var expected = tree, actual = compacted
+        expected.rollUpDirectorySizes()
+        actual.rollUpDirectorySizes()
+        #expect(actual.size(of: FileTree.rootID) == expected.size(of: FileTree.rootID))
+
+        let compactedDocs = try #require(actual.child(of: FileTree.rootID, named: "Documents"))
+        #expect(actual.path(of: compactedDocs) == "/Volumes/T/Documents")
+        #expect(actual.child(of: FileTree.rootID, named: "Stale") == nil)
+    }
+
+    @Test("compaction preserves sibling display order")
+    func compactionPreservesOrder() {
+        var tree = FileTree(rootName: "/")
+        for name in ["a", "b", "c", "d"] {
+            tree.addNode(name: name, parent: FileTree.rootID, size: 1, isDirectory: false)
+        }
+        let before = tree.children(of: FileTree.rootID).map { tree.name(of: $0) }
+        let compacted = tree.compacted()
+        let after = compacted.children(of: FileTree.rootID).map { compacted.name(of: $0) }
+        #expect(before == after)
+    }
+
+    @Test("a compacted tree survives a serialization roundtrip")
+    func compactedRoundtrips() throws {
+        var tree = FileTree(rootName: "/Volumes/T")
+        let dir = tree.addNode(name: "d", parent: FileTree.rootID, size: 0, isDirectory: true)
+        tree.addNode(name: "f.bin", parent: dir, size: 42, isDirectory: false)
+        tree.removeChild(named: "d", of: FileTree.rootID)
+        tree.addNode(name: "live.bin", parent: FileTree.rootID, size: 8, isDirectory: false)
+
+        let compacted = tree.compacted()
+        var decoded = try #require(FileTree(serializedData: compacted.serializedData()))
+        decoded.rollUpDirectorySizes()
+        #expect(decoded.nodeCount == 2)
+        #expect(decoded.size(of: FileTree.rootID) == 8)
+    }
+}

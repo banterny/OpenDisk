@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 import Testing
 @testable import OpenDisk
 
@@ -133,5 +134,110 @@ struct ProtectedPathsTests {
         let tmp = FileManager.default.temporaryDirectory
             .appendingPathComponent("ProtectedPathsTests-\(UUID().uuidString)").path
         #expect(ProtectedPaths.reason(for: tmp) == nil)
+    }
+
+    // MARK: - Canonicalisation bypasses (SECURITY-REVIEW.md C2 / H3)
+
+    /// Every file on the startup disk is reachable twice: at its normal path
+    /// and beneath the Data volume's firmlink. Both name the same inode, so a
+    /// guard that only knows the first name is not a guard.
+    @Test("the Data-volume firmlink cannot be used to reach protected paths")
+    func firmlinkBypass() {
+        let data = "/System/Volumes/Data"
+        // Precondition: the firmlink really is an alias for the same directory
+        // on this machine, otherwise the test proves nothing.
+        func identity(_ path: String) -> String? {
+            var info = stat()
+            guard stat(path, &info) == 0 else { return nil }
+            return "\(info.st_dev):\(info.st_ino)"
+        }
+        try? #require(identity(home) != nil)
+        #expect(identity(data + home) == identity(home))
+
+        #expect(ProtectedPaths.reason(for: data + home) != nil)
+        #expect(ProtectedPaths.reason(for: data + home + "/Library") != nil)
+        #expect(ProtectedPaths.reason(for: data + "/Users") != nil)
+        #expect(ProtectedPaths.reason(for: data + "/Applications") != nil)
+        #expect(ProtectedPaths.reason(for: data + "/Library") != nil)
+        #expect(ProtectedPaths.reason(for: data) != nil)
+    }
+
+    /// The helper volumes of the boot volume group are scanned and displayed
+    /// by ScanEngine.scanBootVolumeGroup, so their contents reach the
+    /// Collector. Deleting inside Preboot leaves the Mac unbootable.
+    @Test("contents of system volumes are protected, not just their roots")
+    func systemVolumeContents() {
+        #expect(ProtectedPaths.reason(for: "/System/Volumes/Preboot") != nil)
+        #expect(ProtectedPaths.reason(for: "/System/Volumes/Preboot/ABC-123") != nil)
+        #expect(ProtectedPaths.reason(for: "/System/Volumes/VM/sleepimage") != nil)
+        #expect(ProtectedPaths.reason(for: "/System/Volumes/Update/mnt1") != nil)
+    }
+
+    /// A symlink pointing at a protected location resolves to it. Refusing
+    /// the link as well is the safe direction: at worst the user cannot
+    /// collect a symlink, which frees no space anyway.
+    @Test("a symlink to a protected location is refused")
+    func symlinkToProtected() throws {
+        let link = FileManager.default.temporaryDirectory
+            .appendingPathComponent("protected-link-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(
+            at: link, withDestinationURL: URL(fileURLWithPath: home)
+        )
+        defer { try? FileManager.default.removeItem(at: link) }
+        #expect(ProtectedPaths.reason(for: link.path) != nil)
+    }
+
+    /// Canonicalisation must not start refusing ordinary files.
+    /// A scan rooted at the Data volume (Finder and Disk Utility both offer
+    /// "Macintosh HD — Data", and the sandboxed build's open panel will hand
+    /// back exactly that) produces rows whose paths keep the prefix. Those are
+    /// ordinary user files and must stay deletable.
+    @Test("Data-prefixed ordinary files are still deletable")
+    func dataPrefixedOrdinaryFilesAllowed() {
+        let data = "/System/Volumes/Data"
+        #expect(ProtectedPaths.reason(for: data + home + "/Downloads") == nil)
+        #expect(ProtectedPaths.reason(for: data + home + "/Downloads/thing.zip") == nil)
+        #expect(ProtectedPaths.reason(for: data + home + "/Library/Caches/Homebrew") == nil)
+        #expect(ProtectedPaths.reason(for: data + "/Library/Caches") == nil)
+    }
+
+    @Test("canonicalisation does not over-block ordinary paths")
+    func noOverBlocking() {
+        #expect(ProtectedPaths.reason(for: home + "/Downloads/thing.zip") == nil)
+        #expect(ProtectedPaths.reason(for: home + "/Library/Caches/Homebrew") == nil)
+        #expect(ProtectedPaths.reason(for: "/Library/Caches") == nil)
+        #expect(ProtectedPaths.reason(for: "/Volumes/External/Backups") == nil)
+    }
+}
+
+/// The test runner is not sandboxed, so the detection must say so — including
+/// when the misleading environment variable is absent, which is the case here.
+/// See SECURITY-REVIEW.md, finding M5.
+@Suite("ScanAccess")
+struct ScanAccessTests {
+
+    @Test("sandbox detection reports false in a non-sandboxed process")
+    func notSandboxedInTestRunner() {
+        #expect(ScanAccess.isSandboxed == false)
+        // And the signal it now leads with is not the environment variable.
+        #expect(NSHomeDirectory() == UserHome.path)
+    }
+}
+
+/// The Collector's drag payload must use the app-private exported type, not
+/// `public.json`. `UTType(exportedAs:)` traps if the declaration is missing
+/// from Info.plist, so merely resolving it here proves the declaration ships.
+/// See SECURITY-REVIEW.md, finding H4.
+@Suite("Collector drag type")
+struct CollectedFileTransferTypeTests {
+
+    @Test("the drag payload uses a private type that conforms to JSON")
+    func privateDragType() {
+        let type = UTType.openDiskCollectedFiles
+        #expect(type.identifier == "ideals.OpenDisk.collected-files")
+        #expect(type != .json)
+        #expect(type.conforms(to: .json))
+        // The whole point: a plain .json file must not satisfy this type.
+        #expect(!UTType.json.conforms(to: type))
     }
 }

@@ -30,12 +30,26 @@ struct CollectedFile: Codable, Transferable, Identifiable, Hashable, Sendable {
     }
 
     static var transferRepresentation: some TransferRepresentation {
-        // Encode as JSON — a standard, already-declared UTI — so the in-app
-        // drag needs no custom exported type in the Info.plist. Also expose a
-        // fileURL proxy so an item can be dragged out to Finder if desired.
-        CodableRepresentation(contentType: .json)
+        // App-private type, NOT bare `public.json` — see CollectedFileGroup.
+        // Also expose a fileURL proxy so an item can be dragged out to Finder.
+        CodableRepresentation(contentType: .openDiskCollectedFiles)
         ProxyRepresentation(exporting: \.url)
     }
+}
+
+extension UTType {
+    /// The Collector's private drag payload type, exported in
+    /// `OpenDisk-Info.plist` and conforming to `public.json`.
+    ///
+    /// It must not be `public.json` itself. The Collector's drop target
+    /// decodes whatever payload it receives into a list of paths to delete,
+    /// and `public.json` is a system-wide type that every `.json` file on the
+    /// machine advertises — so any dragged file, from Finder or another app,
+    /// could decode straight into deletion candidates with an attacker-chosen
+    /// `path`. See SECURITY-REVIEW.md, finding H4.
+    static let openDiskCollectedFiles = UTType(
+        exportedAs: "ideals.OpenDisk.collected-files", conformingTo: .json
+    )
 }
 
 /// One drag's worth of files: a multi-selection dragged together rides as
@@ -45,6 +59,6 @@ struct CollectedFileGroup: Codable, Transferable, Sendable {
     let files: [CollectedFile]
 
     static var transferRepresentation: some TransferRepresentation {
-        CodableRepresentation(contentType: .json)
+        CodableRepresentation(contentType: .openDiskCollectedFiles)
     }
 }

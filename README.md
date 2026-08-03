@@ -12,7 +12,22 @@ A fast, free, and **open-source** disk space analyzer for macOS — an open alte
 
 **[⬇&nbsp;&nbsp;Download for macOS](https://opendisk.app)** &nbsp;·&nbsp; [GitHub releases](https://github.com/137137137/OpenDisk/releases/latest)
 
-Unzip and launch — OpenDisk offers to move itself into Applications, and keeps itself up to date automatically.
+</div>
+
+> ### 🔱 This is a security-reviewed fork
+>
+> Forked from [137137137/OpenDisk](https://github.com/137137137/OpenDisk) and audited before use. **Read [SECURITY-REVIEW.md](SECURITY-REVIEW.md)** for the findings, the fixes, and what is still unfixed.
+>
+> What differs from upstream, in short:
+>
+> - **No auto-updater.** Upstream bundled Sparkle pointed at `opendisk.app` and signed with upstream's key, so a reviewed build would replace itself with an unreviewed one. Update this fork with `git pull` and rebuild.
+> - **Deletion moves to the Trash by default.** Permanent deletion is a Settings toggle, off by default.
+> - **The protected-path guard was bypassable** via the `/System/Volumes/Data` firmlink — the same path that names your home folder. Fixed, with tests.
+> - **Build it yourself**: open `OpenDisk.xcodeproj` in Xcode 26+ and run. Requires macOS 26 (Tahoe). The download link below is upstream's binary, not this fork.
+
+<div align="center">
+
+Unzip and launch — OpenDisk offers to move itself into Applications.
 
 <img src="docs/screenshot.png" alt="OpenDisk showing an interactive sunburst chart beside a sortable folder list" width="900"/>
 

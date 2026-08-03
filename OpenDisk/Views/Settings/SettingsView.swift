@@ -4,9 +4,26 @@ struct SettingsView: View {
     @State private var isFullDiskAccessGranted = false
     @State private var isCheckingAccess = false
     @AppStorage("fda_show_prompt_at_startup") private var showPromptAtStartup = true
+    @AppStorage("delete_permanently") private var deletePermanently = false
 
     var body: some View {
         Form {
+            Section {
+                Toggle(isOn: $deletePermanently) {
+                    VStack(alignment: .leading) {
+                        Text("Delete permanently instead of moving to the Trash")
+
+                        Text(deletePermanently
+                            ? "Collected items are unlinked immediately. Space is reclaimed at once, but nothing can be recovered."
+                            : "Collected items move to the Trash, so you can put them back. Space is reclaimed when you empty the Trash.")
+                            .font(.caption)
+                            .foregroundStyle(deletePermanently ? .orange : .secondary)
+                    }
+                }
+            } header: {
+                Label("Deletion", systemImage: "trash")
+            }
+
             Section {
                 LabeledContent("Status") {
                     HStack {
