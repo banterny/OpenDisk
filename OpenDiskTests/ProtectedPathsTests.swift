@@ -134,4 +134,64 @@ struct ProtectedPathsTests {
             .appendingPathComponent("ProtectedPathsTests-\(UUID().uuidString)").path
         #expect(ProtectedPaths.reason(for: tmp) == nil)
     }
+
+    // MARK: - Canonicalisation bypasses (SECURITY-REVIEW.md C2 / H3)
+
+    /// Every file on the startup disk is reachable twice: at its normal path
+    /// and beneath the Data volume's firmlink. Both name the same inode, so a
+    /// guard that only knows the first name is not a guard.
+    @Test("the Data-volume firmlink cannot be used to reach protected paths")
+    func firmlinkBypass() {
+        let data = "/System/Volumes/Data"
+        // Precondition: the firmlink really is an alias for the same directory
+        // on this machine, otherwise the test proves nothing.
+        func identity(_ path: String) -> String? {
+            var info = stat()
+            guard stat(path, &info) == 0 else { return nil }
+            return "\(info.st_dev):\(info.st_ino)"
+        }
+        try? #require(identity(home) != nil)
+        #expect(identity(data + home) == identity(home))
+
+        #expect(ProtectedPaths.reason(for: data + home) != nil)
+        #expect(ProtectedPaths.reason(for: data + home + "/Library") != nil)
+        #expect(ProtectedPaths.reason(for: data + "/Users") != nil)
+        #expect(ProtectedPaths.reason(for: data + "/Applications") != nil)
+        #expect(ProtectedPaths.reason(for: data + "/Library") != nil)
+        #expect(ProtectedPaths.reason(for: data) != nil)
+    }
+
+    /// The helper volumes of the boot volume group are scanned and displayed
+    /// by ScanEngine.scanBootVolumeGroup, so their contents reach the
+    /// Collector. Deleting inside Preboot leaves the Mac unbootable.
+    @Test("contents of system volumes are protected, not just their roots")
+    func systemVolumeContents() {
+        #expect(ProtectedPaths.reason(for: "/System/Volumes/Preboot") != nil)
+        #expect(ProtectedPaths.reason(for: "/System/Volumes/Preboot/ABC-123") != nil)
+        #expect(ProtectedPaths.reason(for: "/System/Volumes/VM/sleepimage") != nil)
+        #expect(ProtectedPaths.reason(for: "/System/Volumes/Update/mnt1") != nil)
+    }
+
+    /// A symlink pointing at a protected location resolves to it. Refusing
+    /// the link as well is the safe direction: at worst the user cannot
+    /// collect a symlink, which frees no space anyway.
+    @Test("a symlink to a protected location is refused")
+    func symlinkToProtected() throws {
+        let link = FileManager.default.temporaryDirectory
+            .appendingPathComponent("protected-link-\(UUID().uuidString)")
+        try FileManager.default.createSymbolicLink(
+            at: link, withDestinationURL: URL(fileURLWithPath: home)
+        )
+        defer { try? FileManager.default.removeItem(at: link) }
+        #expect(ProtectedPaths.reason(for: link.path) != nil)
+    }
+
+    /// Canonicalisation must not start refusing ordinary files.
+    @Test("canonicalisation does not over-block ordinary paths")
+    func noOverBlocking() {
+        #expect(ProtectedPaths.reason(for: home + "/Downloads/thing.zip") == nil)
+        #expect(ProtectedPaths.reason(for: home + "/Library/Caches/Homebrew") == nil)
+        #expect(ProtectedPaths.reason(for: "/Library/Caches") == nil)
+        #expect(ProtectedPaths.reason(for: "/Volumes/External/Backups") == nil)
+    }
 }
