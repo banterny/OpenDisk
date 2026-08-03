@@ -1,0 +1,30 @@
+// Signing configuration for the app targets.
+//
+// This file is committed and must exist — the project references it as its
+// base configuration. It deliberately carries nobody's Team ID: that is
+// personal identity metadata, this fork is public, and a hardcoded value
+// conflicts on every upstream merge that touches signing.
+//
+// To sign builds with your own identity, create `Local.xcconfig` beside this
+// file (it is gitignored) containing:
+//
+//     OPENDISK_DEVELOPMENT_TEAM = ABCDE12345
+//
+// Find your Team ID with:
+//
+//     security find-certificate -c "Apple Development" -p \
+//       | openssl x509 -noout -subject
+//
+// and read the OU= field — NOT the ID in parentheses after your email, which
+// identifies the certificate rather than the team.
+//
+// Without a Local.xcconfig the project still builds and tests unsigned:
+//
+//     xcodebuild -scheme OpenDisk build CODE_SIGNING_ALLOWED=NO
+//
+// The leading "?" makes the include optional, so a fresh clone with no
+// Local.xcconfig is not a build error.
+#include? "Local.xcconfig"
+
+// Empty unless Local.xcconfig sets it.
+OPENDISK_DEVELOPMENT_TEAM = $(OPENDISK_DEVELOPMENT_TEAM)

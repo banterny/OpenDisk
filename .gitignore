@@ -37,3 +37,7 @@ Carthage/Build/
 fastlane/report.xml
 fastlane/Preview.html
 fastlane/test_output
+
+# Per-developer signing settings — your Apple Team ID is personal identity
+# metadata and this repo is public. See Signing.xcconfig for how to create it.
+Local.xcconfig
