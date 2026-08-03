@@ -1,4 +1,5 @@
 import Foundation
+import UniformTypeIdentifiers
 import Testing
 @testable import OpenDisk
 
@@ -193,5 +194,37 @@ struct ProtectedPathsTests {
         #expect(ProtectedPaths.reason(for: home + "/Library/Caches/Homebrew") == nil)
         #expect(ProtectedPaths.reason(for: "/Library/Caches") == nil)
         #expect(ProtectedPaths.reason(for: "/Volumes/External/Backups") == nil)
+    }
+}
+
+/// The test runner is not sandboxed, so the detection must say so — including
+/// when the misleading environment variable is absent, which is the case here.
+/// See SECURITY-REVIEW.md, finding M5.
+@Suite("ScanAccess")
+struct ScanAccessTests {
+
+    @Test("sandbox detection reports false in a non-sandboxed process")
+    func notSandboxedInTestRunner() {
+        #expect(ScanAccess.isSandboxed == false)
+        // And the signal it now leads with is not the environment variable.
+        #expect(NSHomeDirectory() == UserHome.path)
+    }
+}
+
+/// The Collector's drag payload must use the app-private exported type, not
+/// `public.json`. `UTType(exportedAs:)` traps if the declaration is missing
+/// from Info.plist, so merely resolving it here proves the declaration ships.
+/// See SECURITY-REVIEW.md, finding H4.
+@Suite("Collector drag type")
+struct CollectedFileTransferTypeTests {
+
+    @Test("the drag payload uses a private type that conforms to JSON")
+    func privateDragType() {
+        let type = UTType.openDiskCollectedFiles
+        #expect(type.identifier == "ideals.OpenDisk.collected-files")
+        #expect(type != .json)
+        #expect(type.conforms(to: .json))
+        // The whole point: a plain .json file must not satisfy this type.
+        #expect(!UTType.json.conforms(to: type))
     }
 }
