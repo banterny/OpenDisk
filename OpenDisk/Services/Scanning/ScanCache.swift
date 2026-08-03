@@ -89,7 +89,10 @@ enum ScanCache {
         }
         do {
             try handle.write(contentsOf: header)
-            try handle.write(contentsOf: tree.serializedData())
+            // Compact first: an FSEvents-spliced tree carries the unlinked
+            // remains of everything it replaced, and persisting those makes
+            // the cache grow with every rescan. See SECURITY-REVIEW.md, M2.
+            try handle.write(contentsOf: tree.compacted().serializedData())
             try handle.close()
             _ = try FileManager.default.replaceItemAt(url, withItemAt: temporary)
             prune(directory: directory, keeping: url)

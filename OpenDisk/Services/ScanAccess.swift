@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Security
 import Observation
 
 /// Bridges the two distribution builds' file-access models:
@@ -15,8 +16,52 @@ import Observation
 final class ScanAccess {
 
     /// True when running inside the App Sandbox — i.e. the Mac App Store build.
-    nonisolated static let isSandboxed =
-        ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
+    ///
+    /// Read from our own code signature rather than from
+    /// `APP_SANDBOX_CONTAINER_ID`, which is an environment variable and so is
+    /// controlled by whoever launches the process. Spoofing it does not breach
+    /// the sandbox (the kernel enforces that regardless), but it does steer
+    /// this app down the wrong access path: forced on, the direct build demands
+    /// grants it does not need; forced off, the sandboxed build's `beginAccess`
+    /// returns true unconditionally and every scan silently fails.
+    /// See SECURITY-REVIEW.md, finding M5.
+    /// Three signals, most trustworthy first. Any that answers definitively
+    /// wins; the environment variable is consulted only when neither of the
+    /// others can speak.
+    nonisolated static let isSandboxed: Bool = {
+        if let signed = sandboxEntitlementOfRunningCode() { return signed }
+        if isRunningInSandboxContainer() { return true }
+        return ProcessInfo.processInfo.environment["APP_SANDBOX_CONTAINER_ID"] != nil
+    }()
+
+    /// The `com.apple.security.app-sandbox` entitlement from our own code
+    /// signature — the authoritative answer. Nil when the signature carries no
+    /// entitlements at all (an unsigned or ad-hoc local build), which is not
+    /// the same as "not sandboxed".
+    private nonisolated static func sandboxEntitlementOfRunningCode() -> Bool? {
+        var code: SecCode?
+        guard SecCodeCopySelf([], &code) == errSecSuccess, let code else { return nil }
+        var information: CFDictionary?
+        guard SecCodeCopySigningInformation(
+            unsafeBitCast(code, to: SecStaticCode.self),
+            SecCSFlags(rawValue: kSecCSRequirementInformation),
+            &information
+        ) == errSecSuccess,
+            let dictionary = information as? [String: Any],
+            let entitlements =
+                dictionary[kSecCodeInfoEntitlementsDict as String] as? [String: Any]
+        else { return nil }
+        return entitlements["com.apple.security.app-sandbox"] as? Bool ?? false
+    }
+
+    /// A sandboxed process has its home redirected into its container, so
+    /// `NSHomeDirectory()` and the passwd database disagree. Unlike the
+    /// environment variable this reflects what the kernel actually did to the
+    /// process, not what its launcher claimed.
+    private nonisolated static func isRunningInSandboxContainer() -> Bool {
+        let home = NSHomeDirectory()
+        return home != UserHome.path && home.contains("/Library/Containers/")
+    }
 
     /// A location the user has granted, re-openable without re-granting.
     struct Grant: Identifiable, Hashable {

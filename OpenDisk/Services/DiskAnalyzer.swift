@@ -510,10 +510,14 @@ final class DiskAnalyzer {
         return tree.childrenSortedForDisplay(of: node)
             .prefix(limit ?? Int.max)
             .filter { tree.size(of: $0) > minVisibleSize }
-            .map { child in
-                FolderItem(
+            // Rows are draggable into the Collector, so a row whose path can't
+            // be derived is dropped rather than shown under a guessed one.
+            // See SECURITY-REVIEW.md, finding L1.
+            .compactMap { child -> FolderItem? in
+                guard let path = tree.path(of: child) else { return nil }
+                return FolderItem(
                     name: tree.name(of: child),
-                    path: tree.path(of: child),
+                    path: path,
                     size: tree.size(of: child),
                     isDirectory: tree.isDirectory(child),
                     itemCount: tree.childCount(of: child)

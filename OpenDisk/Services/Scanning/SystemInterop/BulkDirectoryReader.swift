@@ -153,7 +153,12 @@ final class BulkDirectoryReader {
         // Name length includes the trailing NUL.
         let nameLength = Int(record.loadUnaligned(fromByteOffset: 28, as: UInt32.self)) - 1
         let nameStart = 24 + nameDataOffset
-        guard nameLength > 0, nameLength < 1_024, nameStart + nameLength <= length else {
+        // `nameDataOffset` is signed and comes from the kernel unvalidated. A
+        // negative value passes an upper-bound-only check and makes
+        // `advanced(by:)` read *before* the record — and potentially before
+        // the buffer. Bound both ends. See SECURITY-REVIEW.md, finding M3.
+        guard nameStart >= 36, nameLength > 0, nameLength < 1_024,
+              nameStart + nameLength <= length else {
             return
         }
         let namePointer = record.advanced(by: nameStart)

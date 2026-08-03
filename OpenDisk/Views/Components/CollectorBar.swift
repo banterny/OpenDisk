@@ -15,6 +15,12 @@ struct CollectorBar: View {
     /// rescan and bring the updated usage back to the top.
     var onDeleted: (Int64) -> Void
 
+    /// Deletion moves items to the Trash unless the user has opted into
+    /// permanent removal in Settings. Recoverable by default: a mis-drag into
+    /// the tray should not be an unrecoverable event.
+    /// See SECURITY-REVIEW.md, finding H1.
+    @AppStorage("delete_permanently") private var deletePermanently = false
+
     @State private var phase: Phase = .idle
     @State private var footerHovered = false
     @State private var listHovered = false
@@ -103,16 +109,25 @@ struct CollectorBar: View {
             }
             // Native double-confirmation instead of a countdown.
             .confirmationDialog(
-                "Delete \(collector.count) item\(collector.count == 1 ? "" : "s")?",
+                deletePermanently
+                    ? "Permanently delete \(collector.count) item\(collector.count == 1 ? "" : "s")?"
+                    : "Move \(collector.count) item\(collector.count == 1 ? "" : "s") to the Trash?",
                 isPresented: $showConfirm,
                 titleVisibility: .visible
             ) {
-                Button("Delete \(collector.formattedTotal)", role: .destructive) {
+                Button(
+                    deletePermanently
+                        ? "Delete \(collector.formattedTotal)"
+                        : "Move \(collector.formattedTotal) to Trash",
+                    role: .destructive
+                ) {
                     Task { await performDeletion() }
                 }
                 Button("Cancel", role: .cancel) {}
             } message: {
-                Text("This permanently deletes the collected items and can’t be undone.")
+                Text(deletePermanently
+                    ? "This permanently deletes the collected items and can’t be undone."
+                    : "The items move to the Trash, so you can put them back. The space isn’t reclaimed until you empty the Trash.")
             }
     }
 
@@ -182,7 +197,7 @@ struct CollectorBar: View {
             Button {
                 showConfirm = true
             } label: {
-                Text("Delete")
+                Text(deletePermanently ? "Delete" : "Move to Trash")
                     .fontWeight(.semibold)
                     .foregroundStyle(.white)
                     .padding(.horizontal, 16)
@@ -218,7 +233,7 @@ struct CollectorBar: View {
                         .lineLimit(1)
                     if let progress = collector.deletionProgress {
                         HStack(spacing: 0) {
-                            Text("Freed ").foregroundStyle(.secondary)
+                            Text(deletePermanently ? "Freed " : "Moved ").foregroundStyle(.secondary)
                             Text(ByteFormatter.formatFileSize(progress.freedBytes))
                                 .fontWeight(.semibold)
                                 .monospacedDigit()
@@ -244,10 +259,11 @@ struct CollectorBar: View {
 
     /// Names the item currently being removed, e.g. "Deleting npm Cache…".
     private var deletingTitle: String {
+        let verb = deletePermanently ? "Deleting" : "Moving"
         if let name = collector.deletionProgress?.currentName, !name.isEmpty {
-            return "Deleting \(name)…"
+            return "\(verb) \(name)…"
         }
-        return "Deleting…"
+        return deletePermanently ? "Deleting…" : "Moving to Trash…"
     }
 
     private var doneView: some View {
@@ -256,7 +272,10 @@ struct CollectorBar: View {
                 .foregroundStyle(.green)
             if let result = lastResult {
                 HStack(alignment: .firstTextBaseline, spacing: 0) {
-                    Text("Freed ").foregroundStyle(.secondary)
+                    // Trashed bytes are not reclaimed until the Trash is
+                    // emptied, so only permanent deletion may claim "Freed".
+                    Text(result.mode == .permanent ? "Freed " : "Moved to Trash: ")
+                        .foregroundStyle(.secondary)
                     Text(ByteFormatter.formatFileSize(result.freedBytes)).fontWeight(.semibold)
                 }
                 if !result.failures.isEmpty {
@@ -313,10 +332,12 @@ struct CollectorBar: View {
 
     private func performDeletion() async {
         phase = .deleting
-        let result = await collector.deleteAll()
+        let result = await collector.deleteAll(using: deletePermanently ? .permanent : .trash)
         lastResult = result
         phase = .done
-        onDeleted(result.freedBytes)
+        // Only a permanent delete reclaims space; a trash move does not, so
+        // the host is told nothing was freed and won't report a false gain.
+        onDeleted(result.mode == .permanent ? result.freedBytes : 0)
         try? await Task.sleep(for: .seconds(2))
         if phase == .done { phase = .idle }
     }

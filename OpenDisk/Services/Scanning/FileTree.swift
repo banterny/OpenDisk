@@ -205,7 +205,7 @@ struct FileTree: Sendable {
 
     /// Builds the absolute path of a node by walking its parent chain,
     /// treating the root's name as the path prefix ("/" is not doubled).
-    func path(of id: NodeID) -> String {
+    func path(of id: NodeID) -> String? {
         guard id != Self.rootID else { return names[0] }
         var components: [String] = []
         var remaining = nodes.count   // bound: see childCount(of:)
@@ -215,6 +215,13 @@ struct FileTree: Sendable {
             components.append(names[Int(current)])
             current = nodes[Int(current)].parent
         }
+        // Only a walk that actually reached the root produced a real path.
+        // Hitting the bound (a parent cycle from a corrupted cache) or landing
+        // on an unlinked node used to return the partial path joined to the
+        // root prefix — a *different, existing* path, which then flowed into
+        // CollectedFile.path and on to deletion. Returning nil makes callers
+        // skip the row instead. See SECURITY-REVIEW.md, finding L1.
+        guard current == Self.rootID else { return nil }
         return names[0].directoryPrefix + components.reversed().joined(separator: "/")
     }
 
@@ -281,8 +288,15 @@ struct FileTree: Sendable {
         visited[Int(Self.rootID)] = true
         while let current = stack.popLast() {
             order.append(current)
+            // The `visited` bitmap bounds the *stack*, not this sibling walk:
+            // a nextSibling cycle in a corrupted cache would spin here forever
+            // (the deserializer validates index ranges, not acyclicity). Bound
+            // it like every other sibling walk in this file.
+            // See SECURITY-REVIEW.md, finding M1.
+            var remaining = count
             var child = nodes[Int(current)].firstChild
-            while child != Self.noNode {
+            while child != Self.noNode, remaining > 0 {
+                remaining -= 1
                 if !visited[Int(child)] {
                     visited[Int(child)] = true
                     stack.append(child)
@@ -344,6 +358,54 @@ struct FileTree: Sendable {
                 }
             }
         }
+    }
+
+    // MARK: - Compaction
+
+    /// A copy containing only the nodes reachable from the root, with all
+    /// indices remapped.
+    ///
+    /// Incremental updates unlink whole subtrees and leave them in the arrays
+    /// as unreachable garbage (see `removeAllChildren`). `serializedData()`
+    /// writes every node, reachable or not, so without compaction each
+    /// FSEvents-spliced rescan persists the previous scan's orphans as well as
+    /// the new nodes, and both the cache file and the in-memory tree grow
+    /// monotonically across rescans. `ScanCache.prune` caps the cache
+    /// *directory*, never an individual tree. See SECURITY-REVIEW.md, M2.
+    ///
+    /// Sibling order is preserved. O(n) in the node count.
+    func compacted() -> FileTree {
+        let reachable = reachabilityBitmap()
+        // A tree straight off a full scan has no garbage at all, and that is
+        // the common case — every non-incremental save would otherwise pay for
+        // a full O(n) rebuild with nothing to remove.
+        if !reachable.contains(false) { return self }
+
+        var remapped = [NodeID](repeating: Self.noNode, count: nodes.count)
+        var result = FileTree(rootName: names[0])
+        result.nodes[0].size = nodes[0].size
+        result.reserveCapacity(reachable.lazy.filter { $0 }.count)
+        remapped[Int(Self.rootID)] = Self.rootID
+
+        // Pre-order walk, appending each reachable node under its already
+        // appended parent. `link` prepends, so children are pushed in reverse
+        // to come out in the original order.
+        var stack: [NodeID] = [Self.rootID]
+        while let current = stack.popLast() {
+            for child in children(of: current).reversed() {
+                guard reachable[Int(child)] else { continue }
+                let parent = remapped[Int(current)]
+                guard parent != Self.noNode else { continue }
+                remapped[Int(child)] = result.addNode(
+                    name: names[Int(child)],
+                    parent: parent,
+                    size: nodes[Int(child)].size,
+                    isDirectory: nodes[Int(child)].isDirectory
+                )
+                stack.append(child)
+            }
+        }
+        return result
     }
 
     // MARK: - Serialization
@@ -496,8 +558,10 @@ struct FileTree: Sendable {
                 size: other.isDirectory(source) ? 0 : other.size(of: source),
                 isDirectory: other.isDirectory(source)
             )
+            var remaining = other.nodes.count   // bound: see childCount(of:)
             var child = other.nodes[Int(source)].firstChild
-            while child != Self.noNode {
+            while child != Self.noNode, remaining > 0 {
+                remaining -= 1
                 stack.append((child, copy))
                 child = other.nodes[Int(child)].nextSibling
             }
