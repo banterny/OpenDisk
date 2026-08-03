@@ -213,10 +213,15 @@ struct SearchIndex: Sendable {
                 ? tree.name(of: $0.id) < tree.name(of: $1.id)
                 : $0.size > $1.size
         }
-        let items = ranked.map { entry in
-            FolderItem(
+        // A node whose path can't be derived (an unlinked node, or a parent
+        // cycle from a corrupted cache) is dropped rather than shown under a
+        // guessed path — rows are draggable into the Collector, so a wrong
+        // path here is a wrong deletion. See SECURITY-REVIEW.md, finding L1.
+        let items = ranked.compactMap { entry -> FolderItem? in
+            guard let path = tree.path(of: entry.id) else { return nil }
+            return FolderItem(
                 name: tree.name(of: entry.id),
-                path: tree.path(of: entry.id),
+                path: path,
                 size: entry.size,
                 isDirectory: tree.isDirectory(entry.id),
                 itemCount: tree.isDirectory(entry.id) ? tree.childCount(of: entry.id) : 0
