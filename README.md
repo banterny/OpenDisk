@@ -24,6 +24,7 @@ A fast, free, and **open-source** disk space analyzer for macOS — an open alte
 > - **Deletion moves to the Trash by default.** Permanent deletion is a Settings toggle, off by default.
 > - **The protected-path guard was bypassable** via the `/System/Volumes/Data` firmlink — the same path that names your home folder. Fixed, with tests.
 > - **Build it yourself**: open `OpenDisk.xcodeproj` in Xcode 26+ and run. Requires macOS 26 (Tahoe). The download link below is upstream's binary, not this fork.
+> - **Signing**: the project carries no Team ID. To sign with your own, create `Local.xcconfig` (gitignored) as described in [`Signing.xcconfig`](Signing.xcconfig). Without it the project still builds and tests unsigned via `CODE_SIGNING_ALLOWED=NO`.
 
 <div align="center">
 
