@@ -4,8 +4,9 @@ import Synchronization
 
 /// Recursive-descent scanner built on `getattrlistbulk(2)`.
 ///
-/// Used for subtree scans and for volumes that cannot be catalog-scanned
-/// (network mounts, exFAT, or any `searchfs` failure).
+/// The only scan strategy: every volume, subtree, and fallback goes
+/// through here (the HFS+ `searchfs` catalog path was removed with
+/// upstream ddc3646).
 ///
 /// Architecture: a fixed pool of blocking workers on a dedicated concurrent
 /// dispatch queue, pulling directories from one shared LIFO work stack.
@@ -103,13 +104,6 @@ enum TraversalScanner {
         }
     }
 
-    /// Hard links never span volumes, but a multi-device scan must not let
-    /// equal file IDs from different volumes collide.
-    private struct HardLinkKey: Hashable {
-        let device: dev_t
-        let fileID: UInt64
-    }
-
     /// Scans the subtree rooted at `path`, descending only into directories
     /// on `allowedDevices` (default: the root path's own device).
     ///
@@ -140,9 +134,8 @@ enum TraversalScanner {
 
         let tree = Mutex(FileTree(rootName: rootName))
         onPartialTreeAvailable { tree.withLock { $0 } }
-        let seenMultiLinkFiles = Mutex(Set<HardLinkKey>())
+        let seenMultiLinkFiles = Mutex(Set<FileTree.HardLinkKey>())
         let state = WorkState()
-        state.start(with: WorkItem(directoryID: FileTree.rootID, path: path))
 
         let queue = DispatchQueue(
             label: "OpenDisk.TraversalScanner",
@@ -150,6 +143,16 @@ enum TraversalScanner {
             attributes: .concurrent
         )
         let group = DispatchGroup()
+
+        // Seed the stack from the worker queue, not the caller's thread:
+        // every signal of the pool's semaphore then originates at the
+        // queue's .userInitiated floor, so a caller running at a lower (or
+        // unspecified) QoS can never priority-invert a parked worker.
+        // Workers that start first simply park until this lands.
+        // (Ported from upstream 3ac9188.)
+        queue.async {
+            state.start(with: WorkItem(directoryID: FileTree.rootID, path: path))
+        }
 
         for _ in 0..<workerCount {
             queue.async(group: group) {
@@ -171,7 +174,7 @@ enum TraversalScanner {
     private static func runWorker(
         state: WorkState,
         tree: borrowing Mutex<FileTree>,
-        seenMultiLinkFiles: borrowing Mutex<Set<HardLinkKey>>,
+        seenMultiLinkFiles: borrowing Mutex<Set<FileTree.HardLinkKey>>,
         allowedDevices: Set<dev_t>,
         metrics: ScanMetrics,
         isCancelled: @escaping @Sendable () -> Bool
@@ -185,7 +188,7 @@ enum TraversalScanner {
             let outcome = reader.read(
                 directoryAt: item.path, allowedDevices: allowedDevices
             )
-            guard case .contents(var contents, let device) = outcome else {
+            guard case .contents(let contents, let device) = outcome else {
                 // Unopenable directories are counted (not silently skipped)
                 // so an empty result can say "couldn't read" instead of
                 // looking like a genuinely empty folder.
@@ -194,24 +197,26 @@ enum TraversalScanner {
             }
 
             // Hard-linked files (nlink > 1) are the only entries that can be
-            // double-counted, so only those pay for dedup tracking.
+            // double-counted, so only those pay for dedup tracking. The first
+            // sighting keeps its size and repeats count 0 — but *every*
+            // sighting is recorded in the tree, because an incremental
+            // re-read can delete whichever node carried the bytes and must
+            // then promote a survivor (see `normalizeHardLinks`).
+            // (Ported from upstream f08d30e.)
             var directoryBytes: Int64 = 0
-            for index in contents.files.indices {
-                let file = contents.files[index]
+            var countedSizes: [Int64] = []
+            countedSizes.reserveCapacity(contents.files.count)
+            for file in contents.files {
+                var size = file.size
                 if file.linkCount > 1, file.fileID > 0 {
-                    let key = HardLinkKey(device: device, fileID: file.fileID)
+                    let key = FileTree.HardLinkKey(device: device, fileID: file.fileID)
                     let firstSighting = seenMultiLinkFiles.withLock {
                         $0.insert(key).inserted
                     }
-                    if !firstSighting {
-                        contents.files[index] = DirectoryFileEntry(
-                            name: file.name, size: 0,
-                            fileID: file.fileID, linkCount: file.linkCount
-                        )
-                        continue
-                    }
+                    if !firstSighting { size = 0 }
                 }
-                directoryBytes += file.size
+                countedSizes.append(size)
+                directoryBytes += size
             }
 
             let directoryPrefix = item.path.directoryPrefix
@@ -219,11 +224,18 @@ enum TraversalScanner {
             discovered.reserveCapacity(contents.subdirectoryNames.count)
 
             tree.withLock { tree in
-                for file in contents.files {
-                    tree.addNode(
+                for (index, file) in contents.files.enumerated() {
+                    let id = tree.addNode(
                         name: file.name, parent: item.directoryID,
-                        size: file.size, isDirectory: false
+                        size: countedSizes[index], isDirectory: false
                     )
+                    if file.linkCount > 1, file.fileID > 0 {
+                        tree.recordHardLink(
+                            id,
+                            key: FileTree.HardLinkKey(device: device, fileID: file.fileID),
+                            allocatedSize: file.size
+                        )
+                    }
                 }
                 for name in contents.subdirectoryNames {
                     let id = tree.addNode(

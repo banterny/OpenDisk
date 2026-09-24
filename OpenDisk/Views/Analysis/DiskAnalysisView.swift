@@ -1,4 +1,6 @@
 import AppKit
+import QuickLook
+import QuickLookUI
 import SwiftUI
 
 /// Analysis screen for one disk (pushed from the disk picker): scans it,
@@ -6,13 +8,15 @@ import SwiftUI
 /// a split view with the folder list on the left and the rings chart on
 /// the right, both updating as the scan runs.
 ///
-/// Navigation chrome is standard: the stack's back button returns to the
-/// disk picker, refresh lives in the toolbar, and the breadcrumb path bar
-/// sits in the content layer with no custom background.
+/// Navigation chrome makes leaving the scan explicit: an unmount button
+/// confirms before returning to the disk picker and clearing the scan data.
+/// Refresh lives in the toolbar, and the breadcrumb path bar sits in the
+/// content layer with no custom background.
 struct DiskAnalysisView: View {
     let rootPath: String
     let rootName: String
 
+    @Environment(\.dismiss) private var dismiss
     @Environment(ScanAccess.self) private var scanAccess
     @State private var analyzer = DiskAnalyzer()
     @State private var collector = Collector()
@@ -22,17 +26,27 @@ struct DiskAnalysisView: View {
     @State private var hasInitiallyScanned = false
     @State private var searchText = ""
     @State private var searchPresented = false
+    @State private var isShowingUnmountConfirmation = false
     /// Multi-selection (shift-click ranges, ⌘-click toggles) across the
     /// visible list, keyed by path like everything else. A drag from any
     /// selected row carries the whole selection to the Collector.
     @State private var selectedPaths = Set<String>()
     /// The last plainly clicked row — the fixed end of a shift-click range.
     @State private var selectionAnchor: String?
+    /// The item shown in the Quick Look panel (spacebar, like Finder);
+    /// nil while the panel is closed. (Ported from upstream 8854e7d.)
+    @State private var quickLookURL: URL?
+    /// Local key-down monitor that makes spacebar toggle Quick Look.
+    @State private var quickLookKeyMonitor: Any?
     /// Column sort for the directory list (search keeps its own relevance
     /// order). Defaults to largest-first, matching the scan's own ordering.
     @State private var sort: SortField = .size
     @State private var sortAscending = false
     private let totalUsedDiskSpace: Int64
+    /// Live capacity of the volume under `rootPath`, shown in the status
+    /// bar; re-read when a scan ends so deletions and the like show up.
+    /// (Ported from upstream d628684.)
+    @State private var volumeCapacity: VolumeCapacity?
 
     init(
         rootPath: String,
@@ -77,13 +91,15 @@ struct DiskAnalysisView: View {
                 }
                 ScanStatusBar(
                     isScanning: analyzer.isScanning,
+                    phase: analyzer.scanPhase,
                     progressFraction: progressFraction,
                     scannedBytes: analyzer.totalDiskScannedBytes,
                     itemsScanned: analyzer.itemsScanned,
                     scanStartDate: analyzer.scanStartDate,
                     scanDuration: analyzer.scanDuration,
                     totalBytes: analyzer.displayedTotalBytes,
-                    itemCount: analyzer.rootItems.count
+                    itemCount: analyzer.rootItems.count,
+                    volumeCapacity: volumeCapacity
                 )
             } else if analyzer.isScanning {
                 // Only visible for the moments before the skeleton lands.
@@ -105,11 +121,33 @@ struct DiskAnalysisView: View {
         )
         // Native window title + subtitle: the folder currently shown and its
         // size, updating as you navigate (like Finder). The path bar below is
-        // the interactive trail; the toolbar's system back button returns to
-        // the disk list.
+        // the interactive trail; unmounting returns to the disk list.
         .navigationTitle(windowTitle)
         .navigationSubtitle(windowSubtitle)
+        .navigationBarBackButtonHidden()
         .toolbar {
+            // Leaving the scan goes through here so it can confirm first:
+            // dismissing drops the whole scan (and its cache-warm state).
+            // (Ported from upstream d8728af.)
+            ToolbarItem(placement: .navigation) {
+                Button(
+                    "Unmount",
+                    systemImage: "eject",
+                    action: requestUnmount
+                )
+                .keyboardShortcut("[", modifiers: .command)
+                .help("Unmount and clear scan data")
+                .confirmationDialog(
+                    "Unmount \(rootName)?",
+                    isPresented: $isShowingUnmountConfirmation,
+                    titleVisibility: .visible
+                ) {
+                    Button("Unmount", role: .destructive, action: unmount)
+                    Button("Cancel", role: .cancel) {}
+                } message: {
+                    Text("This clears the current scan data and returns to disk selection. It does not eject the disk from macOS.")
+                }
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button("Refresh", systemImage: "arrow.clockwise") {
                     // Refreshing inside the synthetic purgeable view
@@ -125,6 +163,15 @@ struct DiskAnalysisView: View {
             }
         }
         .onAppear {
+            // Spacebar toggles Quick Look, like Finder. A local monitor
+            // rather than .onKeyPress: the list is a plain ScrollView with
+            // no focus management, so there is no focused view to receive
+            // key presses. (Ported from upstream 8854e7d.)
+            if quickLookKeyMonitor == nil {
+                quickLookKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                    handleQuickLookKey(event)
+                }
+            }
             guard !hasInitiallyScanned else { return }
             hasInitiallyScanned = true
             // Sandboxed (App Store) build: hold security-scoped access to the
@@ -133,7 +180,19 @@ struct DiskAnalysisView: View {
             scanAccess.beginAccess(toPath: rootPath)
             Task { await analyzer.scanDirectory(rootPath) }
         }
+        // Volume capacity for the status bar: read once up front and again
+        // whenever a scan ends (a rescan after deleting files is the moment
+        // the user looks for the freed space). (Ported from upstream d628684.)
+        .task(id: rootPath) { await refreshVolumeCapacity() }
+        .onChange(of: analyzer.isScanning) { _, isScanning in
+            if !isScanning { Task { await refreshVolumeCapacity() } }
+        }
         .onDisappear {
+            if let quickLookKeyMonitor {
+                NSEvent.removeMonitor(quickLookKeyMonitor)
+                self.quickLookKeyMonitor = nil
+            }
+            quickLookURL = nil
             analyzer.cancelCurrentScan()
             scanAccess.endAccess(toPath: rootPath)
         }
@@ -253,30 +312,135 @@ struct DiskAnalysisView: View {
         // and the selection payload share it instead of re-filtering and
         // re-sorting per use.
         let items = visibleItems
-        if isSearchActive {
-            SearchResultsView(
-                items: items,
-                resultsVersion: analyzer.searchResultsVersion,
-                totalMatches: analyzer.searchTotalMatches,
-                isRunning: analyzer.isSearchRunning,
-                resultsArePartial: analyzer.searchResultsArePartial,
-                query: searchText,
-                selectedPaths: selectedPaths,
-                selectionFiles: selectionFiles(in: items),
-                onOpen: handleRowTap
-            )
-        } else {
-            VStack(spacing: 0) {
-                columnHeader
-                ScanResultsView(
+        Group {
+            if isSearchActive {
+                SearchResultsView(
                     items: items,
-                    displayVersion: analyzer.displayVersion,
+                    resultsVersion: analyzer.searchResultsVersion,
+                    totalMatches: analyzer.searchTotalMatches,
+                    isRunning: analyzer.isSearchRunning,
+                    resultsArePartial: analyzer.searchResultsArePartial,
+                    query: searchText,
                     selectedPaths: selectedPaths,
                     selectionFiles: selectionFiles(in: items),
-                    onFolderTap: handleRowTap
+                    onQuickLook: quickLook,
+                    onOpen: handleRowTap
                 )
+            } else {
+                VStack(spacing: 0) {
+                    columnHeader
+                    ScanResultsView(
+                        items: items,
+                        displayVersion: analyzer.displayVersion,
+                        selectedPaths: selectedPaths,
+                        selectionFiles: selectionFiles(in: items),
+                        onQuickLook: quickLook,
+                        onFolderTap: handleRowTap
+                    )
+                }
             }
         }
+        // Quick Look panel (spacebar, see handleQuickLookKey). Passing the
+        // visible rows lets the panel's arrow keys walk the list in display
+        // order, like Finder. Synthetic rows have no on-disk file to show.
+        // (Ported from upstream 8854e7d, context-menu entry from 999fae2.)
+        .quickLookPreview(
+            $quickLookURL,
+            in: items.compactMap {
+                $0.path.hasPrefix("::") ? nil : URL(fileURLWithPath: $0.path)
+            }
+        )
+    }
+
+    private func requestUnmount() {
+        isShowingUnmountConfirmation = true
+    }
+
+    private func unmount() {
+        dismiss()
+    }
+
+    // MARK: - Quick Look
+
+    /// Spacebar toggles the Quick Look panel; every other key (and space
+    /// while a text field is being edited) passes through untouched.
+    private func handleQuickLookKey(_ event: NSEvent) -> NSEvent? {
+        guard event.keyCode == 49, !event.isARepeat,
+              event.modifierFlags.intersection([.command, .option, .control]).isEmpty
+        else { return event }
+        // Never steal space from active text editing (the search field —
+        // its field editor is an NSTextView first responder).
+        if event.window?.firstResponder is NSTextView { return event }
+        if quickLookURL != nil {
+            quickLookURL = nil
+            return nil
+        }
+        guard let target = quickLookTarget else { return event }
+        quickLookURL = target
+        centerQuickLookPanel()
+        return nil
+    }
+
+    /// Context-menu entry point: select the row (so the highlight marks
+    /// what's being previewed) and open Quick Look on it.
+    private func quickLook(_ item: FolderItem) {
+        guard !item.path.hasPrefix("::") else { return }
+        selectedPaths = [item.path]
+        selectionAnchor = item.path
+        quickLookURL = URL(fileURLWithPath: item.path)
+        centerQuickLookPanel()
+    }
+
+    /// Centers the shared Quick Look panel over the app window instead of
+    /// the middle of the screen — the preview belongs to the window it was
+    /// invoked from. The SwiftUI modifier creates and shows the panel
+    /// asynchronously, so this retries over a few runloop turns until the
+    /// panel exists, then nudges it into place (clamped to the screen).
+    private func centerQuickLookPanel(attempts: Int = 10) {
+        guard quickLookURL != nil else { return }
+        guard QLPreviewPanel.sharedPreviewPanelExists(),
+              let panel = QLPreviewPanel.shared(), panel.isVisible,
+              let window = NSApp.mainWindow else {
+            if attempts > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.03) {
+                    centerQuickLookPanel(attempts: attempts - 1)
+                }
+            }
+            return
+        }
+        var frame = panel.frame
+        frame.origin = NSPoint(
+            x: window.frame.midX - frame.width / 2,
+            y: window.frame.midY - frame.height / 2
+        )
+        if let screen = (window.screen ?? NSScreen.main)?.visibleFrame {
+            frame.origin.x = min(
+                max(frame.origin.x, screen.minX),
+                max(screen.minX, screen.maxX - frame.width)
+            )
+            frame.origin.y = min(
+                max(frame.origin.y, screen.minY),
+                max(screen.minY, screen.maxY - frame.height)
+            )
+        }
+        panel.setFrame(frame, display: true)
+    }
+
+    /// What spacebar previews: the first selected row in display order,
+    /// falling back to the last plainly clicked row. Synthetic rows have
+    /// nothing on disk to preview.
+    private var quickLookTarget: URL? {
+        let items = visibleItems
+        if let selected = items.first(where: {
+            selectedPaths.contains($0.path) && !$0.path.hasPrefix("::")
+        }) {
+            return URL(fileURLWithPath: selected.path)
+        }
+        if let anchor = selectionAnchor, !anchor.hasPrefix("::"),
+           items.contains(where: { $0.path == anchor }) {
+            return URL(fileURLWithPath: anchor)
+        }
+        return nil
     }
 
     // MARK: - Sortable column header
@@ -360,8 +524,13 @@ struct DiskAnalysisView: View {
         selectionAnchor = item.path
         if isSearchActive {
             openSearchResult(item)
-        } else {
+        } else if item.isDirectory {
             navigateToFolder(item)
+        } else if selectable {
+            // A plain click on a file selects it (Finder's rule) — it has
+            // nowhere to navigate to, and the highlight marks what spacebar
+            // will Quick Look. (Ported from upstream 8854e7d.)
+            selectedPaths = [item.path]
         }
     }
 
@@ -437,6 +606,13 @@ struct DiskAnalysisView: View {
     private var progressFraction: Double? {
         guard totalUsedDiskSpace > 0 else { return nil }
         return min(1.0, Double(analyzer.totalDiskScannedBytes) / Double(totalUsedDiskSpace))
+    }
+
+    private func refreshVolumeCapacity() async {
+        let path = rootPath
+        volumeCapacity = await Task.detached(priority: .utility) {
+            DeviceMonitor.volumeCapacity(ofPath: path)
+        }.value
     }
 
     // MARK: - Window title

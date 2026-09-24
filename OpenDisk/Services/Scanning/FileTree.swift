@@ -17,6 +17,29 @@ struct FileTree: Sendable {
     static let rootID: NodeID = 0
     static let noNode: NodeID = -1
 
+    /// Identity of one hard-linked inode. Hard links never span volumes,
+    /// but a multi-device scan must not let equal file IDs from different
+    /// volumes collide, so the device is part of the key.
+    /// (Ported from upstream f08d30e.)
+    struct HardLinkKey: Hashable, Sendable {
+        let device: UInt64
+        let fileID: UInt64
+
+        init(device: UInt64, fileID: UInt64) {
+            self.device = device
+            self.fileID = fileID
+        }
+
+        init(device: dev_t, fileID: UInt64) {
+            self.init(device: UInt64(bitPattern: Int64(device)), fileID: fileID)
+        }
+    }
+
+    private struct HardLink: Sendable {
+        let key: HardLinkKey
+        let allocatedSize: Int64
+    }
+
     /// Per-node fixed-size storage; names live in the parallel `names`
     /// array. Child counts are derived by walking the sibling chain — the
     /// few places that need them touch at most ~100 visible rows.
@@ -30,6 +53,7 @@ struct FileTree: Sendable {
 
     private var nodes: [Node]
     private var names: [String]
+    private var hardLinks: [NodeID: HardLink] = [:]
 
     // MARK: - Construction
 
@@ -55,6 +79,49 @@ struct FileTree: Sendable {
         let id = appendUnlinked(name: name, size: size, isDirectory: isDirectory)
         link(id, under: parent)
         return id
+    }
+
+    // MARK: - Hard links
+
+    /// Records that `id` is one link of the inode `key`, whose fully
+    /// counted size is `allocatedSize`. The node's own `size` is the
+    /// scan-time share (full on first sighting, 0 on repeats); the record
+    /// is what lets `normalizeHardLinks()` re-derive those shares after
+    /// incremental splicing moves or deletes nodes around.
+    /// (Ported from upstream f08d30e.)
+    mutating func recordHardLink(_ id: NodeID, key: HardLinkKey, allocatedSize: Int64) {
+        hardLinks[id] = HardLink(key: key, allocatedSize: allocatedSize)
+    }
+
+    func hardLinkKey(of id: NodeID) -> HardLinkKey? {
+        hardLinks[id]?.key
+    }
+
+    var hardLinkKeys: Set<HardLinkKey> {
+        Set(hardLinks.values.map(\.key))
+    }
+
+    /// Re-derives per-node hard-link sizes deterministically: the lowest-ID
+    /// reachable node per inode keeps the full allocated size, every other
+    /// sighting counts 0, and records for unreachable (spliced-away) nodes
+    /// are dropped.
+    ///
+    /// Incremental updates add re-read files at full size and can delete
+    /// whichever node happened to carry the bytes, so scan-time first-
+    /// sighting shares are meaningless after splicing — this must run after
+    /// every splice, before `rollUpDirectorySizes()`.
+    /// (Ported from upstream f08d30e.)
+    mutating func normalizeHardLinks() {
+        guard !hardLinks.isEmpty else { return }
+        let reachable = reachabilityBitmap()
+        var counted = Set<HardLinkKey>()
+        for id in hardLinks.keys.sorted() {
+            guard reachable[Int(id)], let link = hardLinks[id] else {
+                hardLinks[id] = nil
+                continue
+            }
+            nodes[Int(id)].size = counted.insert(link.key).inserted ? link.allocatedSize : 0
+        }
     }
 
     /// Appends a node without linking it anywhere. Used by builders that
@@ -402,6 +469,14 @@ struct FileTree: Sendable {
                     size: nodes[Int(child)].size,
                     isDirectory: nodes[Int(child)].isDirectory
                 )
+                // Hard-link records are keyed by node ID, which this rebuild
+                // remaps — carry them across, or the compacted tree (and the
+                // cache file written from it) would lose link identity and
+                // every later incremental update would spuriously fall back
+                // to a full scan.
+                if let link = hardLinks[child] {
+                    result.hardLinks[remapped[Int(child)]] = link
+                }
                 stack.append(child)
             }
         }
@@ -463,6 +538,20 @@ struct FileTree: Sendable {
         for name in names {
             data.append(contentsOf: name.utf8)
         }
+
+        // Hard-link records, appended after the name blob: the link section
+        // is what lets a cached tree keep inode identity across launches,
+        // so an incremental update applied to a loaded cache can still tell
+        // a known link (bytes already counted) from a new one (full scan
+        // needed). Bumped the magic (below) rather than versioning inside
+        // the blob: an old reader must reject the new layout outright, not
+        // misparse it. (Ported from upstream f08d30e.)
+        let linkedIDs = hardLinks.keys.sorted()
+        append(UInt32(linkedIDs.count))
+        appendArray(linkedIDs)
+        appendArray(linkedIDs.map { hardLinks[$0]!.key.device })
+        appendArray(linkedIDs.map { hardLinks[$0]!.key.fileID })
+        appendArray(linkedIDs.map { hardLinks[$0]!.allocatedSize })
         return data
     }
 
@@ -471,7 +560,7 @@ struct FileTree: Sendable {
     /// (offsets are relative to `data.startIndex`), so callers can pass a
     /// no-copy view into a larger mapped file.
     init?(serializedData data: Data) {
-        let result: (nodes: [Node], names: [String])? = data.withUnsafeBytes { raw in
+        let result: (nodes: [Node], names: [String], hardLinks: [NodeID: HardLink])? = data.withUnsafeBytes { raw in
             var offset = 0
             func read<T>(_ type: T.Type) -> T? {
                 let size = MemoryLayout<T>.size
@@ -536,14 +625,37 @@ struct FileTree: Sendable {
                     isDirectory: directoryFlags[index] != 0
                 ))
             }
-            return (rebuiltNodes, rebuiltNames)
+            // Link section (see `serializedData`): absent in pre-hard-link
+            // blobs, which the magic check above already rejected — a blob
+            // that ends here is truncated, not old.
+            guard let linkCount32 = read(UInt32.self) else { return nil }
+            let linkCount = Int(linkCount32)
+            guard linkCount <= count,
+                  let linkedIDs = readArray(NodeID.self, count: linkCount),
+                  let devices = readArray(UInt64.self, count: linkCount),
+                  let fileIDs = readArray(UInt64.self, count: linkCount),
+                  let allocatedSizes = readArray(Int64.self, count: linkCount) else { return nil }
+            var rebuiltHardLinks = [NodeID: HardLink](minimumCapacity: linkCount)
+            for index in 0..<linkCount {
+                let id = linkedIDs[index]
+                // A record pointing at the root, out of range, or at a
+                // directory is corruption, not data: it would misattribute
+                // bytes to a node whose size feeds totals and the Collector.
+                guard id > Self.rootID, id < bound, !rebuiltNodes[Int(id)].isDirectory else { return nil }
+                rebuiltHardLinks[id] = HardLink(
+                    key: HardLinkKey(device: devices[index], fileID: fileIDs[index]),
+                    allocatedSize: allocatedSizes[index]
+                )
+            }
+            return (rebuiltNodes, rebuiltNames, rebuiltHardLinks)
         }
         guard let result else { return nil }
         nodes = result.nodes
         names = result.names
+        hardLinks = result.hardLinks
     }
 
-    private static let serializationMagic: UInt32 = 0x444D_5432 // "DMT2"
+    private static let serializationMagic: UInt32 = 0x444D_5433 // "DMT3"
 
     /// Copies a whole subtree from another tree under `parent`.
     /// Iterative to survive arbitrarily deep hierarchies.
@@ -558,6 +670,13 @@ struct FileTree: Sendable {
                 size: other.isDirectory(source) ? 0 : other.size(of: source),
                 isDirectory: other.isDirectory(source)
             )
+            // Link identity moves with the node: without this, merged and
+            // incrementally adopted subtrees would shed their records and
+            // later splices would treat every carried link as unknown.
+            // (Ported from upstream f08d30e.)
+            if let link = other.hardLinks[source] {
+                hardLinks[copy] = link
+            }
             var remaining = other.nodes.count   // bound: see childCount(of:)
             var child = other.nodes[Int(source)].firstChild
             while child != Self.noNode, remaining > 0 {

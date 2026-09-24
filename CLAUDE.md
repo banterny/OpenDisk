@@ -8,7 +8,7 @@ written the way they are, and the reasoning is not obvious from the code alone.
 ## Commands
 
 ```bash
-# Tests (78). Run these before and after any change.
+# Tests (81). Run these before and after any change.
 xcodebuild test -scheme OpenDisk -destination 'platform=macOS' \
   CODE_SIGNING_ALLOWED=NO -only-testing:OpenDiskTests
 

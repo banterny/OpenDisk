@@ -501,3 +501,31 @@ Both test targets are pinned to `MACOSX_DEPLOYMENT_TARGET = 15.5` while the app
 module requires 26.0, so `xcodebuild test` fails at build time and **every test
 in the repository is dead upstream**. Fixed by raising the test targets to 26.0.
 No test logic was changed.
+
+## 🔄 Upstream ports (Sep 2026)
+
+Selective ports from upstream `137137137/OpenDisk` (commits `3ac9188`,
+`f08d30e`, `999fae2`, `ddc3646`, `8854e7d`, `d8728af`, `d628684`), adapted
+file by file — never merged, so none of the fixes above were regressed.
+Deliberately *not* ported: Sparkle/`SoftwareUpdater`, `MoveToApplications`,
+the Check-for-Updates UI (C1), the `ProtectedPaths` simplification (C2),
+`Collector` deletion-path changes (H1), the `LICENSE` attribution removal, and
+the macOS 15 deployment-target lowering.
+
+Security-relevant consequences of what *was* ported:
+
+- **Cache/tree format changed** (`ScanCache` v1→v2, `FileTree` magic
+  `"DMT2"`→`"DMT3"`): trees now persist per-inode hard-link records. Old
+  caches are rejected by both version checks and the root is rescanned — a
+  stale file can never be misparsed as the new layout.
+- **Hard-link records are untrusted input.** The deserializer validates every
+  record (ID in range, non-root, non-directory) and `normalizeHardLinks()`
+  drops records for unreachable nodes, so a tampered cache can at worst force
+  a full-scan fallback, never misattribute bytes to a wrong node (whose size
+  feeds the Collector).
+- **Catalog/`searchfs` code is deleted** (`CatalogScanner.swift`,
+  `SearchFS.swift`), not merely unbuilt — one less private-syscall surface,
+  and no dead scanner for a future change to accidentally re-enable.
+- Hard-link *totals* are now counted exactly once across re-reads (previously
+  double-counted); `freedBytes` remains a scan-time figure (residual risk,
+  first bullet above).
