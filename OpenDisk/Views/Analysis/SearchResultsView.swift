@@ -19,6 +19,9 @@ struct SearchResultsView: View {
     /// collector payloads for group drags.
     var selectedPaths: Set<String> = []
     var selectionFiles: [CollectedFile] = []
+    /// Passed through to each row's "Quick Look" context-menu item.
+    /// (Ported from upstream 999fae2.)
+    var onQuickLook: ((FolderItem) -> Void)? = nil
     let onOpen: (FolderItem) -> Void
 
     var body: some View {
@@ -42,7 +45,8 @@ struct SearchResultsView: View {
                                 item: item,
                                 locationDetail: location(of: item),
                                 isSelected: selectedPaths.contains(item.path),
-                                selectionFiles: selectionFiles
+                                selectionFiles: selectionFiles,
+                                onQuickLook: onQuickLook
                             ) {
                                 onOpen(item)
                             }

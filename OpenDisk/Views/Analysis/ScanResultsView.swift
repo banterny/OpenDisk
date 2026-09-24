@@ -12,6 +12,9 @@ struct ScanResultsView: View {
     /// collector payloads for group drags.
     var selectedPaths: Set<String> = []
     var selectionFiles: [CollectedFile] = []
+    /// Passed through to each row's "Quick Look" context-menu item.
+    /// (Ported from upstream 999fae2.)
+    var onQuickLook: ((FolderItem) -> Void)? = nil
     let onFolderTap: (FolderItem) -> Void
 
     var body: some View {
@@ -31,7 +34,8 @@ struct ScanResultsView: View {
                         item: item,
                         isSelected: selectedPaths.contains(item.path),
                         selectionFiles: selectionFiles,
-                        sizeFraction: maxSize > 0 ? Double(item.size) / Double(maxSize) : nil
+                        sizeFraction: maxSize > 0 ? Double(item.size) / Double(maxSize) : nil,
+                        onQuickLook: onQuickLook
                     ) {
                         onFolderTap(item)
                     }

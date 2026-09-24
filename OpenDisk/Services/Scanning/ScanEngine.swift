@@ -47,18 +47,23 @@ private final class PartialResultAssembler: Sendable {
     }
 }
 
-/// The production scanner: picks the fastest strategy per volume and
-/// composes the results.
+/// The production scanner: parallel `getattrlistbulk` traversal, composed
+/// across volumes.
 ///
 /// Strategy selection:
-/// - Scanning `/` composes several volumes: the Data volume and the sealed
-///   System volume are catalog-scanned in parallel and merged along their
-///   firmlink points, and every other volume mounted under
-///   `/System/Volumes` (Preboot, VM, Update, ...) is grafted in — matching
-///   what "used space on this Mac" actually means on a volume-group system.
-/// - Scanning any other volume root (external drives) catalog-scans that
-///   volume when it supports `searchfs`.
-/// - Subtree rescans and every fallback use the traversal scanner.
+/// - Scanning `/` composes several volumes: a single traversal of "/"
+///   covers the volume group through the live firmlink namespace, and every
+///   other volume mounted under `/System/Volumes` (Preboot, VM, Update, ...)
+///   is grafted in — matching what "used space on this Mac" actually means
+///   on a volume-group system.
+/// - Every other scan (external drives, subtree rescans, all fallbacks)
+///   uses the traversal scanner.
+///
+/// (The `searchfs` catalog path for HFS+ is gone: it was slower than
+/// traversal on every filesystem that matters, and any concurrent volume
+/// mutation aborted it with EBUSY. Removed with upstream ddc3646, with the
+/// dead `CatalogScanner`/`searchfs` sources deleted rather than left
+/// excluded from the build.)
 ///
 /// While the scan runs, the engine streams `.partial` snapshots — the
 /// same composition applied to whatever each scanner has discovered so
@@ -177,6 +182,21 @@ final class ScanEngine: DiskScanning {
 
     // MARK: - Blocking scan pipeline
 
+    /// Dedicated queue for the blocking scan steps. A custom concurrent
+    /// queue, NOT `DispatchQueue.global(qos:)`: a global queue runs each
+    /// block at the QoS propagated from its submitter, so a submission
+    /// from an unspecified-QoS context executes at base priority 0 — and
+    /// that thread goes on to seed the traversal pool's semaphore and wait
+    /// on its DispatchGroup, a priority inversion against the
+    /// `.userInitiated` workers (flagged by the Thread Performance
+    /// Checker). A custom queue's own QoS is a floor no block runs below.
+    /// (Ported from upstream 3ac9188.)
+    private static let offloadQueue = DispatchQueue(
+        label: "OpenDisk.ScanEngine.offload",
+        qos: .userInitiated,
+        attributes: .concurrent
+    )
+
     /// Runs one heavy, synchronous/blocking scan step on a dedicated
     /// background thread — never the Swift concurrency cooperative pool
     /// (mirrors the dispatch the old top-level scan entry used).
@@ -184,7 +204,7 @@ final class ScanEngine: DiskScanning {
         _ work: @escaping @Sendable () -> T
     ) async -> T {
         await withCheckedContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
+            offloadQueue.async {
                 continuation.resume(returning: work())
             }
         }
@@ -235,15 +255,6 @@ final class ScanEngine: DiskScanning {
         return FileManager.default.fileExists(atPath: dataPath) ? dataPath : path
     }
 
-    /// Whether the volume rooted at `path` scans through the catalog
-    /// scanner. One predicate feeds both strategy selection and cache
-    /// eligibility (the cache only backs traversal scans).
-    private static func usesCatalogScan(forRoot path: String) -> Bool {
-        VolumeAttributes.isVolumeRoot(path)
-            && VolumeAttributes.filesystemType(ofVolumeContaining: path) == "hfs"
-            && VolumeAttributes.supportsCatalogSearch(atPath: path)
-    }
-
     // MARK: - Scan cache
 
     /// Scans `path` through the on-disk cache when possible: a cached
@@ -264,25 +275,32 @@ final class ScanEngine: DiskScanning {
         // replay into the next one.
         let startEventID = FSEventsChangeJournal.currentEventID
 
-        // HFS+ volumes go through the catalog scanner; no cache there.
-        let usesCatalog = usesCatalogScan(forRoot: path)
-
-        if !usesCatalog {
+        // The replay needs only the header's event ID, so it starts
+        // immediately — concurrent with the (much heavier) tree decode —
+        // instead of after it. Between them they are the pre-scan stretch
+        // where nothing is being counted; the phase marker lets the status
+        // bar say so instead of showing a dead "Scanning…".
+        // (Ported from upstream 999fae2.)
+        if let header = ScanCache.peek(forRoot: path) {
+            metrics.setPhase(.checkingChanges)
+            // Pure async suspension — no thread is blocked while the
+            // journal streams HistoryDone, bails, or times out.
+            async let pendingChanges = FSEventsChangeJournal.changes(
+                since: header.eventID, under: path,
+                timeout: replayTimeBudget(cacheFileBytes: header.fileBytes)
+            )
             // Deserializing a saved tree is heavy: off the cooperative pool.
             let cached = await offload { ScanCache.load(forRoot: path) }
             if let cached, cached.tree.name(of: FileTree.rootID) == rootName {
                 // Show the previous scan instantly as the first partial
-                // snapshot, *before* the journal replay — so a re-scan isn't a
-                // blank 0% for a beat while the journal streams. The full-scan
-                // fallback below re-registers under the same key if the replay
-                // turns out unreliable, replacing this.
+                // snapshot, *before* the journal replay finishes — so a
+                // re-scan isn't a blank 0% while the journal streams. The
+                // full-scan fallback below re-registers under the same key if
+                // the replay turns out unreliable, replacing this.
                 let live = Mutex(cached.tree)
                 registerPartial { live.withLock { $0 } }
-                // Pure async suspension — no thread is blocked while the
-                // journal streams HistoryDone or times out.
-                let changes = await FSEventsChangeJournal.changes(
-                    since: cached.eventID, under: path
-                )
+                let changes = await pendingChanges
+                metrics.setPhase(.scanning)
                 if let changes {
                     // Splicing up to 40k changed directories is heavy work.
                     let applied = await offload {
@@ -298,21 +316,40 @@ final class ScanEngine: DiskScanning {
                         return tree
                     }
                 }
+            } else {
+                // Header parsed but the tree didn't (truncated file, format
+                // drift): drain the replay and full-scan.
+                _ = await pendingChanges
+                metrics.setPhase(.scanning)
             }
         }
 
         // Full scan/traversal is the multi-second bulk: off the cooperative pool.
         let tree = await offload {
-            scanVolumeOrTraverse(
+            traverse(
                 path: path, rootName: rootName, allowedDevices: allowedDevices,
                 metrics: metrics, isCancelled: isCancelled,
                 registerPartial: registerPartial
             )
         }
-        if !usesCatalog && !isCancelled() {
+        if !isCancelled() {
             saveCacheInBackground(tree: tree, rootPath: path, eventID: startEventID)
         }
         return tree
+    }
+
+    /// How long the journal replay may run before the engine gives up and
+    /// full-scans: a small fraction of what the full scan itself would
+    /// cost, so the incremental path can never lose much even when the
+    /// journal turns out useless. The full-scan cost is estimated from the
+    /// cache file's size (~50 serialized bytes per node, traversal reads
+    /// ~200k nodes/s ⇒ ~10 MB of cache per scan-second), taking a fifth of
+    /// that. Small scans wait at most a second; even a whole-disk,
+    /// multi-million-node scan waits at most a few — nothing like the
+    /// fixed 10s this replaced. (Ported from upstream 999fae2.)
+    private static func replayTimeBudget(cacheFileBytes: Int) -> TimeInterval {
+        let estimatedFullScanSeconds = Double(cacheFileBytes) / 10_000_000
+        return min(4, max(1, estimatedFullScanSeconds / 5))
     }
 
     /// Serializing a multi-million-node tree takes hundreds of
@@ -340,27 +377,14 @@ final class ScanEngine: DiskScanning {
         return devices
     }
 
-    /// Scans one volume or subtree with the fastest measured strategy.
-    ///
-    /// Strategy, benchmarked on this hardware (4M-entry APFS Data volume):
-    /// - APFS: parallel `getattrlistbulk` traversal, ~12.6s. `searchfs`
-    ///   measured 27s+ on the same volume (the kernel's APFS catalog walk
-    ///   streams only ~150k entries/s regardless of batch size) and worse,
-    ///   any concurrent volume mutation aborts it with EBUSY and forces a
-    ///   full re-walk — up to 4x on a busy system. The catalog's only
-    ///   advantage is seeing entries inside directories the process cannot
-    ///   open (~0.3% of items here).
-    /// - HFS+ (and anything else advertising `searchfs`): catalog scan —
-    ///   on spinning-disk-era HFS+ the catalog walk is roughly an order of
-    ///   magnitude faster than traversal, and such volumes are usually
-    ///   external/read-mostly, where EBUSY restarts are rare.
-    /// - No `searchfs` support (network mounts, exFAT) or subtree rescans:
-    ///   traversal.
+    /// Traverses one volume or subtree with parallel `getattrlistbulk`
+    /// workers: 8-ish for a whole volume, 4–5 for a subtree (APFS
+    /// serializes directory reads, so throughput drops off past that).
+    /// (Catalog-scan dispatch removed with upstream ddc3646.)
     ///
     /// `registerPartial` receives the running scanner's partial-tree
-    /// provider; on a catalog-to-traversal fallback it is called again and
-    /// the later registration must win.
-    private static func scanVolumeOrTraverse(
+    /// provider.
+    private static func traverse(
         path: String,
         rootName: String,
         allowedDevices: Set<dev_t>? = nil,
@@ -368,23 +392,9 @@ final class ScanEngine: DiskScanning {
         isCancelled: @escaping @Sendable () -> Bool,
         registerPartial: @escaping @Sendable (@escaping PartialTreeProvider) -> Void = { _ in }
     ) -> FileTree {
-        let isVolumeRoot = VolumeAttributes.isVolumeRoot(path)
-        if usesCatalogScan(forRoot: path) {
-            do {
-                return try CatalogScanner.scanVolume(
-                    mountPoint: path, rootName: rootName,
-                    metrics: metrics, isCancelled: isCancelled,
-                    onPartialTreeAvailable: registerPartial
-                )
-            } catch CatalogSearchError.cancelled {
-                return FileTree(rootName: rootName)
-            } catch {
-                // Fall through to traversal on any other catalog failure.
-            }
-        }
-        return TraversalScanner.scan(
+        TraversalScanner.scan(
             path: path, rootName: rootName, allowedDevices: allowedDevices,
-            workerCount: isVolumeRoot
+            workerCount: VolumeAttributes.isVolumeRoot(path)
                 ? TraversalScanner.volumeWorkerCount
                 : TraversalScanner.subtreeWorkerCount,
             metrics: metrics, isCancelled: isCancelled,
@@ -444,7 +454,7 @@ final class ScanEngine: DiskScanning {
             // Off the cooperative pool; the `await` still runs siblings
             // strictly one after another (the APFS single-worker-pool rule).
             let tree = await offload {
-                scanVolumeOrTraverse(
+                traverse(
                     path: mountPoint, rootName: mountPoint,
                     metrics: metrics, isCancelled: isCancelled,
                     registerPartial: { assembler.register(siblingTreeKey(name), provider: $0) }
