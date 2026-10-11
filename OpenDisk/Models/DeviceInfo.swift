@@ -31,7 +31,26 @@ struct DeviceInfo: Identifiable, Hashable, Sendable {
 /// (Ported from upstream d628684.)
 struct VolumeCapacity: Hashable, Sendable {
     let total: Int64
+    /// What the user can actually put on the disk: free blocks *plus*
+    /// purgeable space (local Time Machine snapshots, caches macOS evicts on
+    /// demand). This is the figure Finder shows as "available", and the one
+    /// the status bar must match — reporting bare free blocks made a disk
+    /// look tens of GB fuller than Finder said it was.
     let available: Int64
+    /// Blocks free right now, purgeable space not included.
+    let free: Int64
+
+    /// `availableForImportantUsage` is the system's own free-plus-purgeable
+    /// figure. It is absent on volumes that don't support it, and can read
+    /// *lower* than `free` — in both cases `free` stands. Clamped to `total`
+    /// so `used` can never go negative on a volume reporting nonsense.
+    /// (Ported from upstream ab1644a.)
+    init(total: Int64, free: Int64, availableForImportantUsage: Int64? = nil) {
+        self.total = total
+        self.free = free
+        self.available = min(total, max(free, availableForImportantUsage ?? 0))
+    }
 
     var used: Int64 { total - available }
+    var purgeable: Int64 { available - free }
 }
