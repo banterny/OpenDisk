@@ -18,27 +18,54 @@ enum FullDiskAccess {
     ///
     /// Probes several TCC-protected locations that require FDA to read (and
     /// reading them also registers the app in the FDA list of System Settings).
-    /// The first probe that *exists* settles it — readable means granted,
-    /// unreadable means denied — and a path that isn't present on this Mac is
-    /// skipped rather than counted as a denial. (A world-readable path like
-    /// `/Library/Application Support` must NOT be used — it succeeds without FDA.)
+    /// *Every* probe that exists must be readable; a path that isn't present
+    /// on this Mac is skipped rather than counted as a denial. (A
+    /// world-readable path like `/Library/Application Support` must NOT be
+    /// used — it succeeds without FDA.)
+    ///
+    /// This used to stop at the first probe that existed. That trusts a
+    /// single location, and a location can become readable by a narrower
+    /// grant than FDA — another app's container, for one, sits behind the
+    /// separate "access data from other apps" permission — which reported FDA
+    /// as granted when it was not, so the prompt never appeared and scans
+    /// silently skipped everything still protected. Requiring agreement
+    /// across all of them, plus one system-domain file outside the home
+    /// folder, fails closed instead. (Ported from upstream 228e962, "fix full
+    /// disk access for macos27". Upstream does not record which probe
+    /// misbehaved; the explanation above is the likeliest reading, not a
+    /// confirmed one.)
     static var isGranted: Bool {
         let home = NSHomeDirectory()
-        let probes = [
-            "/Library/Containers/com.apple.stocks",
-            "/Library/Safari",
-            "/Library/Mail",
-            "/Library/Messages",
-        ].map { home + $0 }
+        let directories = [
+            home + "/Library/Containers/com.apple.stocks",
+            home + "/Library/Safari",
+            home + "/Library/Mail",
+            home + "/Library/Messages",
+        ]
+        let files = [
+            "/Library/Preferences/com.apple.TimeMachine.plist",
+        ]
 
-        for path in probes where FileManager.default.fileExists(atPath: path) {
+        var probed = 0
+        var readable = 0
+        for path in directories where FileManager.default.fileExists(atPath: path) {
+            probed += 1
             if (try? FileManager.default.contentsOfDirectory(atPath: path)) != nil {
-                return true
+                readable += 1
+            } else {
+                log.debug("Full Disk Access probe failed (cannot list \(path))")
             }
-            log.debug("Full Disk Access is not granted (cannot read \(path))")
-            return false
         }
-        return false
+        for path in files where FileManager.default.fileExists(atPath: path) {
+            probed += 1
+            if let handle = FileHandle(forReadingAtPath: path) {
+                readable += 1
+                try? handle.close()
+            } else {
+                log.debug("Full Disk Access probe failed (cannot open \(path))")
+            }
+        }
+        return probed > 0 && readable == probed
     }
 
     /// Relaunches the app — Full Disk Access only reaches a *freshly launched*
@@ -54,6 +81,10 @@ enum FullDiskAccess {
 
     /// Opens System Settings on Privacy & Security > Full Disk Access.
     static func openSystemSettings() {
+        // Probing is what adds the app to the Full Disk Access list, so do
+        // it before the pane opens — otherwise a user arriving from the
+        // Settings window finds no OpenDisk row to switch on.
+        _ = isGranted
         let url = URL(
             string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles"
         )!
