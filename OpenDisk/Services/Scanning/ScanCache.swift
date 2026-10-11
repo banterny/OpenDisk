@@ -7,19 +7,37 @@ import Foundation
 /// that ID and re-read only the directories that changed since.
 enum ScanCache {
 
+    /// What is known about the scan a cached tree came from.
+    /// (Ported from upstream d987b27.)
+    struct Header: Sendable {
+        /// FSEvents ID from just before the cached scan began.
+        let eventID: UInt64
+        /// Wall-clock time the cached scan began. A file born after this
+        /// cannot have been counted in the cached tree, which is what lets
+        /// an incremental update accept new hard-linked files (see
+        /// `IncrementalUpdater.HardLinkPolicy`).
+        let capturedAt: Date
+        /// How long the last *full* traversal of this root took, carried
+        /// forward unchanged across incremental updates. Sizes the journal
+        /// replay's time budget from a measurement instead of a guess; 0
+        /// when unknown.
+        let fullScanSeconds: TimeInterval
+    }
+
     struct Entry {
         /// The cached tree, with directory sizes NOT rolled up (ready for
         /// splicing and a fresh roll-up).
         let tree: FileTree
-        /// FSEvents ID from just before the cached scan began.
-        let eventID: UInt64
+        let header: Header
     }
 
     // v2: trees now carry hard-link records in a new serialization layout
-    // ("DMT3"). v1 files are rejected by the version check at load and the
-    // root is simply rescanned — a stale cache must never be misparsed.
-    // (Ported from upstream f08d30e.)
-    private static let formatVersion: UInt32 = 2
+    // ("DMT3"). (Ported from upstream f08d30e.)
+    // v3: the header gains the capture time and the measured full-scan
+    // duration. (Ported from upstream d987b27.)
+    // Older files are rejected by the version check at load and the root is
+    // simply rescanned — a stale cache must never be misparsed.
+    private static let formatVersion: UInt32 = 3
 
     // MARK: - Public API
 
@@ -28,25 +46,25 @@ enum ScanCache {
         // instead of copying the whole file up front.
         guard let url = cacheFileURL(forRoot: rootPath),
               let data = try? Data(contentsOf: url, options: .mappedIfSafe),
-              let header = parseHeader(data, forRoot: rootPath),
+              let parsed = parseHeader(data, forRoot: rootPath),
               // The tree decodes from a no-copy slice of the mapped file.
-              let tree = FileTree(serializedData: data[header.treeStart...]) else {
+              let tree = FileTree(serializedData: data[parsed.treeStart...]) else {
             return nil
         }
-        return Entry(tree: tree, eventID: header.eventID)
+        return Entry(tree: tree, header: parsed.header)
     }
 
-    /// The cached scan's FSEvents ID and the cache file's size, validated
-    /// for this exact root — without decoding the tree (the expensive part
-    /// of `load`). Lets a journal replay start while the tree deserializes
-    /// in parallel; the byte count is a cheap proxy for how big the cached
-    /// scan was, which sizes the replay's time budget.
+    /// The cached scan's header and the cache file's size, validated for
+    /// this exact root — without decoding the tree (the expensive part of
+    /// `load`). Lets a journal replay start while the tree deserializes in
+    /// parallel; the byte count is a fallback proxy for how big the cached
+    /// scan was, for a header with no measured scan duration.
     /// (Ported from upstream 999fae2.)
-    static func peek(forRoot rootPath: String) -> (eventID: UInt64, fileBytes: Int)? {
+    static func peek(forRoot rootPath: String) -> (header: Header, fileBytes: Int)? {
         guard let url = cacheFileURL(forRoot: rootPath),
               let data = try? Data(contentsOf: url, options: .mappedIfSafe),
-              let header = parseHeader(data, forRoot: rootPath) else { return nil }
-        return (header.eventID, data.count)
+              let parsed = parseHeader(data, forRoot: rootPath) else { return nil }
+        return (parsed.header, data.count)
     }
 
     /// Parses and validates the fixed header: the cache must describe this
@@ -55,7 +73,7 @@ enum ScanCache {
     /// (Extracted from `load`, upstream 999fae2.)
     private static func parseHeader(
         _ data: Data, forRoot rootPath: String
-    ) -> (eventID: UInt64, treeStart: Data.Index)? {
+    ) -> (header: Header, treeStart: Data.Index)? {
         var offset = data.startIndex
         func read<T>(_ type: T.Type) -> T? {
             let size = MemoryLayout<T>.size
@@ -68,6 +86,8 @@ enum ScanCache {
 
         guard read(UInt32.self) == formatVersion,
               let eventID = read(UInt64.self),
+              let capturedAt = read(Double.self),
+              let fullScanSeconds = read(Double.self),
               let savedDevice = read(UInt64.self),
               let pathLength = read(UInt32.self),
               offset + Int(pathLength) <= data.endIndex else { return nil }
@@ -80,12 +100,23 @@ enum ScanCache {
               UInt64(bitPattern: Int64(device)) == savedDevice else {
             return nil
         }
-        return (eventID, offset)
+        // Both doubles come off disk and feed arithmetic (a timeout, a
+        // date comparison). A NaN or infinity from a damaged file must not
+        // get that far — treat the cache as unusable instead.
+        guard capturedAt.isFinite, fullScanSeconds.isFinite, fullScanSeconds >= 0 else {
+            return nil
+        }
+        let header = Header(
+            eventID: eventID,
+            capturedAt: Date(timeIntervalSince1970: capturedAt),
+            fullScanSeconds: fullScanSeconds
+        )
+        return (header, offset)
     }
 
     /// Blocking (~hundreds of ms for multi-million-node trees): call from
     /// a background queue.
-    static func save(tree: FileTree, forRoot rootPath: String, eventID: UInt64) {
+    static func save(tree: FileTree, forRoot rootPath: String, header cacheHeader: Header) {
         guard let url = cacheFileURL(forRoot: rootPath),
               let device = VolumeAttributes.deviceID(ofPath: rootPath) else { return }
 
@@ -94,7 +125,9 @@ enum ScanCache {
             withUnsafeBytes(of: value) { header.append(contentsOf: $0) }
         }
         append(formatVersion)
-        append(eventID)
+        append(cacheHeader.eventID)
+        append(cacheHeader.capturedAt.timeIntervalSince1970)
+        append(cacheHeader.fullScanSeconds)
         append(UInt64(bitPattern: Int64(device)))
         let pathBytes = Data(rootPath.utf8)
         append(UInt32(pathBytes.count))
