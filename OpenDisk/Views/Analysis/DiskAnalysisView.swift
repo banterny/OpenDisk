@@ -148,6 +148,12 @@ struct DiskAnalysisView: View {
                     Text("This clears the current scan data and returns to disk selection. It does not eject the disk from macOS.")
                 }
             }
+            ToolbarItem(placement: .navigation) {
+                Button("Enclosing Folder", systemImage: "arrow.up", action: goToParent)
+                .keyboardShortcut(.upArrow, modifiers: .command)
+                .disabled(parentPath == nil)
+                .help("Go to the enclosing folder (⌘↑)")
+            }
             ToolbarItem(placement: .primaryAction) {
                 Button("Refresh", systemImage: "arrow.clockwise", action: refresh)
                 .keyboardShortcut("r", modifiers: .command)
@@ -723,6 +729,27 @@ struct DiskAnalysisView: View {
         guard showContents(of: previousPath) else { return }
         breadcrumbs.removeLast()
         currentPath = previousPath
+    }
+
+    /// The folder enclosing the one on screen, or nil at the scan root.
+    ///
+    /// Distinct from `goBack()`, which retraces the breadcrumb *history*:
+    /// after jumping deep via a search result or a chart ring, "back" and
+    /// "up" are different places. Never leaves the scan root — a parent that
+    /// falls outside it (and any synthetic "::" location, which has no
+    /// parent on disk) resolves to the root itself.
+    /// (Ported from upstream 59a83ec.)
+    private var parentPath: String? {
+        guard currentPath != rootPath else { return nil }
+        if currentPath.hasPrefix("::") { return rootPath }
+        let parent = (currentPath as NSString).deletingLastPathComponent
+        guard parent.hasPrefix(rootPath.directoryPrefix) || parent == rootPath else { return rootPath }
+        return parent
+    }
+
+    private func goToParent() {
+        guard let parentPath else { return }
+        navigateToPath(parentPath)
     }
 
     private func navigateToPath(_ path: String) {
