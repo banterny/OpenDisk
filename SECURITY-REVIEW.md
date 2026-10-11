@@ -267,6 +267,16 @@ in `Info.plist` and conforming to `public.json`. The drag payload now uses that
 type, so a plain `.json` file no longer matches the drop target. In-app drags are
 unaffected.
 
+**Superseded, Oct 2026 — now stronger than the fix above.** The private type
+only ever kept *accidental* payloads out: a type identifier is a string, and a
+hostile app can write any string to the drag pasteboard. With the drag rewrite
+ported from upstream (`e9a1158`, `43e4967`) the drop target no longer decodes
+a payload at all. `InAppFileDropDelegate` accepts a drop only while
+`FileDragSource.shared.activeFiles` is set — in-process state that exists only
+during a drag begun in this app — and takes the files from there. A foreign
+drag fails validation whatever types it advertises. The private type survives
+only as the pasteboard marker for drags that carry no file URL.
+
 ---
 
 ## 🟡 Medium
@@ -529,3 +539,77 @@ Security-relevant consequences of what *was* ported:
 - Hard-link *totals* are now counted exactly once across re-reads (previously
   double-counted); `freedBytes` remains a scan-time figure (residual risk,
   first bullet above).
+
+---
+
+## 🔄 Upstream ports (Oct 2026)
+
+Upstream moved from `70a67e3` to `f7551cf` (v1.2.2 → v1.2.8, 17 commits). All
+17 were read. None reintroduces anything the fixes above removed: there is no
+new network code, no new `Process` use outside `MoveToApplications` (which
+this fork does not have), and no change to `ProtectedPaths` or the deletion
+path. Upstream still ships Sparkle and still compares paths as raw strings.
+
+Ported, commit by commit and adapted — never merged:
+
+| Upstream | What | Adaptation |
+|---|---|---|
+| `228e962` | Full Disk Access probe requires every location to be readable | none |
+| `e9a1158`, `43e4967` | AppKit drag source; drags reach other apps as files; items can be dragged out of the Collector | private type kept; **copy-only outside the app**; see below |
+| `ab1644a`, `628c2e5` | "Available" includes purgeable space, polled every 2s | none |
+| `d987b27` | Incremental updates reuse the cache more often | kept synchronous and off the cooperative pool; L1, M2 preserved |
+| `59a83ec` | Enclosing Folder button (⌘↑) | breadcrumb half skipped (pre-macOS 26 workaround) |
+| `ccc37cd`, `80e91c7` | Free-space wedge on the chart, with a setting | none |
+| `f7551cf` | Configurable keyboard shortcuts | sheets and alerts keep their keys |
+
+Not ported:
+
+- `4b1c06b`, `e1f10eb` — `MoveToApplications` (C1). The second also adds an
+  AppTranslocation guard to the FDA prompt, which is only meaningful alongside
+  that file's relaunch.
+- `c1bf746`, `a1b0685` — a rewrite of the traversal worker pool onto
+  continuations, done to quiet Swift 6 sendability diagnostics the fork does
+  not have. `a1b0685` also takes `IncrementalUpdater.apply` off the offload
+  queue, putting its blocking directory reads on the cooperative pool — the
+  exact thing `TraversalScanner`'s header comment warns against.
+- `6e6ac7d` — added, then removed again by `43e4967`.
+- `1ebeea4`, `efbdec5`, `f94fd40` — version bumps.
+
+Security-relevant consequences of what *was* ported:
+
+- **H4 is now enforced by in-process state**, not by a type name. See the note
+  added under H4.
+- **A drag out of the app can copy a file but never move it.** Upstream offers
+  `.move` and `.generic` to other apps, so dragging a row onto a Finder window
+  on the same volume *moves* the file, and dragging it onto the Dock's Trash
+  bins it — with no confirmation and no `ProtectedPaths` check. That is a
+  second deletion path beside the Collector, bypassing C2 and H1 entirely.
+  This fork offers `.copy` alone (`FileDragSource.operationMask(for:)`, pinned
+  by a test). Finder copies; the Trash refuses the drop.
+- **Items dragged out of the Collector carry no file URL.** That gesture can
+  only un-collect; nothing on disk can be copied, moved or removed by it.
+- **Keyboard shortcuts cannot delete.** `addToCollector` (⌘⌫ by default) calls
+  the same `collect()` as a drop, so it passes the same `ProtectedPaths`
+  filter and still ends at the Collector's confirmation. Matching uses a local
+  event monitor; nothing is registered system-wide and no new permission is
+  requested.
+- **Cache header v2→v3** adds a capture time and a measured scan duration.
+  Both are doubles read from disk and both feed arithmetic, so a non-finite or
+  negative value makes the cache unusable rather than reaching a timeout or a
+  date comparison. v2 files are rejected and the root rescanned once.
+- **Hard-link acceptance is looser, on purpose.** An incremental update now
+  accepts a hard link the cache never recorded if the *inode* was born after
+  the cached scan began. The decision rests on `st_birthtime`, which a local
+  process can set; the worst outcome of a wrong answer is a mis-sized chart
+  (bytes counted twice, or a needless full scan). These values do not reach
+  the deletion path, and callers that pass no capture time get the old strict
+  rule.
+- **Large files are `lstat`-ed after an incremental update**, by a path built
+  from the tree. `path(of:)` returning nil skips the node (L1): a truncated
+  path is a different real file, whose size would otherwise be written onto
+  the wrong node.
+
+Not verified by hand: the drag gestures themselves. The pasteboard contents,
+operation mask and Collector state changes are covered by tests; a real mouse
+drag — row to Collector, row to Finder, item out of the Collector — is not
+something the test suite can perform.

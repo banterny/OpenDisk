@@ -8,7 +8,7 @@ written the way they are, and the reasoning is not obvious from the code alone.
 ## Commands
 
 ```bash
-# Tests (81). Run these before and after any change.
+# Tests (105). Run these before and after any change.
 xcodebuild test -scheme OpenDisk -destination 'platform=macOS' \
   CODE_SIGNING_ALLOWED=NO -only-testing:OpenDiskTests
 
@@ -49,18 +49,26 @@ Each one is a fixed finding. Reintroducing any of them re-opens a real hole.
    `ProtectedPaths` immediately before each removal, not only at collect time.
    Note `deleteAll(using:)`'s *parameter* default is `.permanent` so the
    pre-existing tests stay hermetic; `CollectorBar` passes the mode explicitly. (H1)
-5. **The Collector's drag payload uses `ideals.OpenDisk.collected-files`, never
-   `public.json`.** The drop target decodes its payload into paths to delete,
-   and `public.json` is advertised by every `.json` file on the machine. The
-   type is exported in `OpenDisk-Info.plist`; `UTType(exportedAs:)` traps if
-   that declaration goes missing. (H4)
-6. **Every sibling-chain walk in `FileTree` is bounded.** The `visited` bitmap
+5. **The Collector's drop target never reads the pasteboard.** Dropped files
+   become deletion candidates, so `InAppFileDropDelegate` accepts a drop only
+   while `FileDragSource.shared.activeFiles` is set — a drag begun in this
+   process — and takes the files from there. Do not reintroduce
+   `.dropDestination(for:)` or any decoding of a dragged payload. The private
+   type `ideals.OpenDisk.collected-files` (never `public.json`) remains as
+   the marker for drags with no file URL; it is exported in
+   `OpenDisk-Info.plist`, and `UTType(exportedAs:)` traps if that declaration
+   goes missing. (H4)
+6. **A drag out of the app is copy-only.** `FileDragSource.operationMask`
+   must not offer `.move` or `.generic` outside the application: either lets
+   Finder move the file, or the Dock's Trash bin it, with no confirmation and
+   no `ProtectedPaths` check. Upstream offers both. (H1, C2)
+7. **Every sibling-chain walk in `FileTree` is bounded.** The `visited` bitmap
    bounds the *stack*, not the sibling chain; an unbounded walk hangs forever
    on a cycle from a corrupted cache. (M1)
-7. **`FileTree.path(of:)` returns `String?`.** A truncated path is a
+8. **`FileTree.path(of:)` returns `String?`.** A truncated path is a
    *different, real* path, and these values flow into deletion. Callers skip
    rows they cannot resolve. (L1)
-8. **Trees are compacted before being written to `ScanCache`**, or incremental
+9. **Trees are compacted before being written to `ScanCache`**, or incremental
    rescans persist their own orphans and the cache grows without bound. (M2)
 
 ## Conventions
@@ -96,5 +104,12 @@ git merge upstream/main
 
 Read the diff first — that is the whole point of the fork, since there is no
 updater to do it for you. Watch in particular for anything reintroducing
-Sparkle, `MoveToApplications`, `removeItem` as the deletion default, or string
-comparison in `ProtectedPaths`. Re-run the tests after any merge.
+Sparkle, `MoveToApplications`, `removeItem` as the deletion default, string
+comparison in `ProtectedPaths`, `.move` in the drag operation mask, or `async`
+on the scanner's blocking calls. Re-run the tests after any merge.
+
+In practice a merge is not workable: upstream stripped its comments and the
+fork kept them, so nearly every hunk conflicts. What has worked is
+`git cherry-pick -n <commit>` one commit at a time, restoring
+`OpenDisk.xcodeproj` and `OpenDisk-Info.plist` from `HEAD` after each, then
+reading every hunk. Last reviewed upstream commit: `f7551cf` (v1.2.8).
