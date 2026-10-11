@@ -36,8 +36,11 @@ struct DiskAnalysisView: View {
     /// The item shown in the Quick Look panel (spacebar, like Finder);
     /// nil while the panel is closed. (Ported from upstream 8854e7d.)
     @State private var quickLookURL: URL?
-    /// Local key-down monitor that makes spacebar toggle Quick Look.
-    @State private var quickLookKeyMonitor: Any?
+    /// Local key-down monitor behind every list shortcut (arrows, Quick
+    /// Look, add to Collector…). See `handleKey`.
+    @State private var keyMonitor: Any?
+    /// The user's shortcut assignments (Settings ▸ Keyboard Shortcuts).
+    @State private var keyBindings = KeyBindingStore.shared
     /// Column sort for the directory list (search keeps its own relevance
     /// order). Defaults to largest-first, matching the scan's own ordering.
     @State private var sort: SortField = .size
@@ -162,13 +165,14 @@ struct DiskAnalysisView: View {
             }
         }
         .onAppear {
-            // Spacebar toggles Quick Look, like Finder. A local monitor
-            // rather than .onKeyPress: the list is a plain ScrollView with
-            // no focus management, so there is no focused view to receive
-            // key presses. (Ported from upstream 8854e7d.)
-            if quickLookKeyMonitor == nil {
-                quickLookKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-                    handleQuickLookKey(event)
+            // List shortcuts, Finder-style. A local monitor rather than
+            // .onKeyPress: the list is a plain ScrollView with no focus
+            // management, so there is no focused view to receive key
+            // presses. (Quick Look ported from upstream 8854e7d, the
+            // configurable set from f7551cf.)
+            if keyMonitor == nil {
+                keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+                    handleKey(event)
                 }
             }
             guard !hasInitiallyScanned else { return }
@@ -197,9 +201,9 @@ struct DiskAnalysisView: View {
             if !isScanning { Task { await refreshVolumeCapacity() } }
         }
         .onDisappear {
-            if let quickLookKeyMonitor {
-                NSEvent.removeMonitor(quickLookKeyMonitor)
-                self.quickLookKeyMonitor = nil
+            if let keyMonitor {
+                NSEvent.removeMonitor(keyMonitor)
+                self.keyMonitor = nil
             }
             quickLookURL = nil
             analyzer.cancelCurrentScan()
@@ -331,6 +335,7 @@ struct DiskAnalysisView: View {
                     resultsArePartial: analyzer.searchResultsArePartial,
                     query: searchText,
                     selectedPaths: selectedPaths,
+                    focusedPath: selectionAnchor,
                     selectionFiles: selectionFiles(in: items),
                     onQuickLook: quickLook,
                     onOpen: handleRowTap
@@ -342,6 +347,7 @@ struct DiskAnalysisView: View {
                         items: items,
                         displayVersion: analyzer.displayVersion,
                         selectedPaths: selectedPaths,
+                        focusedPath: selectionAnchor,
                         selectionFiles: selectionFiles(in: items),
                         onQuickLook: quickLook,
                         onFolderTap: handleRowTap
@@ -349,7 +355,7 @@ struct DiskAnalysisView: View {
                 }
             }
         }
-        // Quick Look panel (spacebar, see handleQuickLookKey). Passing the
+        // Quick Look panel (spacebar by default, see handleKey). Passing the
         // visible rows lets the panel's arrow keys walk the list in display
         // order, like Finder. Synthetic rows have no on-disk file to show.
         // (Ported from upstream 8854e7d, context-menu entry from 999fae2.)
@@ -369,25 +375,160 @@ struct DiskAnalysisView: View {
         dismiss()
     }
 
-    // MARK: - Quick Look
+    // MARK: - Keyboard shortcuts
 
-    /// Spacebar toggles the Quick Look panel; every other key (and space
-    /// while a text field is being edited) passes through untouched.
-    private func handleQuickLookKey(_ event: NSEvent) -> NSEvent? {
-        guard event.keyCode == 49, !event.isARepeat,
-              event.modifierFlags.intersection([.command, .option, .control]).isEmpty
-        else { return event }
-        // Never steal space from active text editing (the search field —
-        // its field editor is an NSTextView first responder).
+    /// Routes a key press to the action it is bound to, or passes it on
+    /// untouched. Returning nil consumes the event.
+    ///
+    /// A local monitor sees every key press in the *app*, not just this
+    /// window, so the guards below are what keep the shortcuts from firing
+    /// where they don't belong:
+    /// - a key repeat only drives the two "move" actions (holding ↓ should
+    ///   run down the list; holding ⌘⌫ should not collect row after row);
+    /// - nothing is taken from active text editing (the search field — its
+    ///   field editor is an NSTextView first responder);
+    /// - nothing is taken from a sheet or alert. This guard is the fork's:
+    ///   the delete confirmation is presented as a sheet, and its keys must
+    ///   reach it whatever the user has bound them to here;
+    /// - while the Quick Look panel is key, only the Quick Look shortcut is
+    ///   honoured, so the panel keeps its own arrow-key behaviour.
+    ///
+    /// No shortcut deletes anything. The furthest one goes is
+    /// `addToCollector`, which runs the same `collect` as a drop — through
+    /// the same `ProtectedPaths` filter — and leaves the items waiting on
+    /// the Collector's own confirmation.
+    private func handleKey(_ event: NSEvent) -> NSEvent? {
+        guard !event.isARepeat || isRepeatable(event) else { return event }
+        if event.window?.sheetParent != nil { return event }
         if event.window?.firstResponder is NSTextView { return event }
-        if quickLookURL != nil {
-            quickLookURL = nil
+        if event.window is QLPreviewPanel, !keyMatchesQuickLook(event) { return event }
+        guard let match = keyBindings.match(event) else { return event }
+        perform(match)
+        return nil
+    }
+
+    private func isRepeatable(_ event: NSEvent) -> Bool {
+        guard let match = keyBindings.match(event) else { return false }
+        return match.action == .moveDown || match.action == .moveUp
+    }
+
+    private func keyMatchesQuickLook(_ event: NSEvent) -> Bool {
+        keyBindings.match(event)?.action == .quickLook
+    }
+
+    private func perform(_ match: KeyBindingStore.Match) {
+        switch match.action {
+        case .moveDown:
+            moveFocus(by: 1, extending: match.extendsSelection)
+        case .moveUp:
+            moveFocus(by: -1, extending: match.extendsSelection)
+        case .openSelected:
+            openFocusedItem()
+        case .enclosingFolder:
+            goToParent()
+        case .addToCollector:
+            collectSelection()
+        case .quickLook:
+            toggleQuickLook()
+        case .showInFinder:
+            showSelectionInFinder()
+        case .selectAll:
+            selectAllItems()
+        }
+    }
+
+    private var focusedItem: FolderItem? {
+        let items = visibleItems
+        if let anchor = selectionAnchor, let item = items.first(where: { $0.path == anchor }) {
+            return item
+        }
+        return items.first { selectedPaths.contains($0.path) }
+    }
+
+    private func moveFocus(by offset: Int, extending: Bool) {
+        let items = visibleItems
+        guard !items.isEmpty else { return }
+        let currentIndex = focusedItem.flatMap { item in items.firstIndex { $0.path == item.path } }
+        let nextIndex: Int
+        if let currentIndex {
+            nextIndex = min(max(currentIndex + offset, 0), items.count - 1)
+        } else {
+            nextIndex = offset > 0 ? 0 : items.count - 1
+        }
+        let next = items[nextIndex]
+        let selectable = !next.path.hasPrefix("::")
+        if extending, selectable {
+            selectedPaths.insert(next.path)
+            if let current = focusedItem, !current.path.hasPrefix("::") {
+                selectedPaths.insert(current.path)
+            }
+        } else {
+            selectedPaths = selectable ? [next.path] : []
+        }
+        selectionAnchor = next.path
+        if quickLookURL != nil, selectable {
+            quickLookURL = URL(fileURLWithPath: next.path)
+        }
+    }
+
+    private func openFocusedItem() {
+        guard let item = focusedItem else { return }
+        if isSearchActive {
+            openSearchResult(item)
+        } else if item.isDirectory {
+            navigateToFolder(item)
+        } else {
+            quickLook(item)
+        }
+    }
+
+    private func collectSelection() {
+        let items = visibleItems
+        var files = items.filter { selectedPaths.contains($0.path) }.map(CollectedFile.init)
+        if files.isEmpty, let item = focusedItem {
+            files = [CollectedFile(item)]
+        }
+        guard !files.isEmpty else { return }
+        let nextAnchor = nextFocus(after: files.map(\.path), in: items)
+        guard collect(files) else { return }
+        selectionAnchor = nextAnchor
+        if let nextAnchor, !nextAnchor.hasPrefix("::") {
+            selectedPaths = [nextAnchor]
+        }
+    }
+
+    private func nextFocus(after removed: [String], in items: [FolderItem]) -> String? {
+        let removedSet = Set(removed)
+        guard let lastIndex = items.lastIndex(where: { removedSet.contains($0.path) }) else {
             return nil
         }
-        guard let target = quickLookTarget else { return event }
+        if let after = items[lastIndex...].first(where: { !removedSet.contains($0.path) }) {
+            return after.path
+        }
+        return items[..<lastIndex].last { !removedSet.contains($0.path) }?.path
+    }
+
+    private func toggleQuickLook() {
+        if quickLookURL != nil {
+            quickLookURL = nil
+            return
+        }
+        guard let target = quickLookTarget else { return }
         quickLookURL = target
         centerQuickLookPanel()
-        return nil
+    }
+
+    private func showSelectionInFinder() {
+        var paths = visibleItems.filter { selectedPaths.contains($0.path) }.map(\.path)
+        if paths.isEmpty, let item = focusedItem, !item.path.hasPrefix("::") {
+            paths = [item.path]
+        }
+        guard !paths.isEmpty else { return }
+        NSWorkspace.shared.activateFileViewerSelecting(paths.map { URL(fileURLWithPath: $0) })
+    }
+
+    private func selectAllItems() {
+        selectedPaths = Set(visibleItems.map(\.path).filter { !$0.hasPrefix("::") })
     }
 
     /// Context-menu entry point: select the row (so the highlight marks
@@ -626,9 +767,18 @@ struct DiskAnalysisView: View {
             collector.resolveDragOut(droppedAt: location)
             return true
         }
-        // Dragging the "Purgeable Space" row expands to its real, deletable
-        // cache folders (its size is the sum of those, so the collected
-        // total matches).
+        return collect(files)
+    }
+
+    /// Adds `files` to the Collector, minus anything macOS-protected. The
+    /// one entry point for both a drop and the keyboard shortcut, so the two
+    /// cannot drift apart in what they let through. Returns false when
+    /// nothing was collectable.
+    @discardableResult
+    private func collect(_ files: [CollectedFile]) -> Bool {
+        // The "Purgeable Space" row expands to its real, deletable cache
+        // folders (its size is the sum of those, so the collected total
+        // matches).
         let expanded = files.flatMap { file in
             file.path == HiddenSpaceInfo.sentinelPath
                 ? analyzer.collectablePurgeableFiles()

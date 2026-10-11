@@ -18,6 +18,7 @@ struct SearchResultsView: View {
     /// Paths of the multi-selected rows, and the same selection as
     /// collector payloads for group drags.
     var selectedPaths: Set<String> = []
+    var focusedPath: String? = nil
     var selectionFiles: [CollectedFile] = []
     /// Passed through to each row's "Quick Look" context-menu item.
     /// (Ported from upstream 999fae2.)
@@ -38,21 +39,28 @@ struct SearchResultsView: View {
             } else if items.isEmpty {
                 ContentUnavailableView.search(text: query)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(items) { item in
-                            FolderRowView(
-                                item: item,
-                                locationDetail: location(of: item),
-                                isSelected: selectedPaths.contains(item.path),
-                                selectionFiles: selectionFiles,
-                                onQuickLook: onQuickLook
-                            ) {
-                                onOpen(item)
+                ScrollViewReader { proxy in
+                    ScrollView {
+                        LazyVStack(spacing: 0) {
+                            ForEach(items) { item in
+                                FolderRowView(
+                                    item: item,
+                                    locationDetail: location(of: item),
+                                    isSelected: selectedPaths.contains(item.path),
+                                    selectionFiles: selectionFiles,
+                                    onQuickLook: onQuickLook
+                                ) {
+                                    onOpen(item)
+                                }
+                                .id(item.path)
                             }
                         }
+                        .padding(.vertical, 4)
                     }
-                    .padding(.vertical, 4)
+                    .onChange(of: focusedPath) { _, path in
+                        guard let path, items.contains(where: { $0.path == path }) else { return }
+                        proxy.scrollTo(path)
+                    }
                 }
                 // Icons resolve in display order before their rows scroll
                 // into view; scrolling then blits cached bitmaps instead
