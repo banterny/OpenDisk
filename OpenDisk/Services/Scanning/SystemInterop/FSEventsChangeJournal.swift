@@ -25,8 +25,8 @@ enum FSEventsChangeJournal {
     /// splicing.
     private static let maxUsefulChanges = 40_000
 
-    /// Accumulates journal events. `changes`/`unreliable` are mutated only
-    /// on the FSEvents callback queue, and only while the latch is open —
+    /// Accumulates journal events. The two path sets and `unreliable` are
+    /// mutated only on the FSEvents callback queue, and only while the latch is open —
     /// the callback checks `isFinished` before touching them, so nothing
     /// mutates after completion. The resuming task reads them exclusively
     /// through a `queue.sync` barrier (see `changes(since:under:timeout:)`), which
@@ -40,18 +40,29 @@ enum FSEventsChangeJournal {
     /// all result post-processing happens after the await, not in the
     /// callback.
     private final class Collector: @unchecked Sendable {
-        var changes = Changes()
+        /// Sets, not arrays: the journal logs one event per change, so a
+        /// single churning directory (a browser cache, a build folder) can
+        /// appear tens of thousands of times. Deduplicating as events arrive
+        /// keeps memory bounded by distinct directories and makes the bail
+        /// test below exact. (Ported from upstream d987b27.)
+        var changedDirectories = Set<String>()
+        var subtreesToRescan = Set<String>()
         var unreliable = false
         let rootPrefix: String
-        /// Raw (pre-dedup) accumulated-change count at which history replay
-        /// gives up early — the outcome (full scan) is already decided, so
-        /// streaming the rest of the journal or riding out the timeout only
-        /// delays it. Raw counts overshoot deduplicated ones (one churning
-        /// directory logs many events), so this is a generous multiple of
-        /// `maxUsefulChanges`. Stored here so the C callback below never
-        /// references outer statics (which the Swift 6.3 frontend crashes on).
-        /// (Ported from upstream 999fae2.)
-        let earlyBailChangeCount = maxUsefulChanges * 4
+        /// Distinct-directory count at which history replay gives up early —
+        /// the outcome (full scan) is already decided, so streaming the rest
+        /// of the journal or riding out the timeout only delays it.
+        ///
+        /// This used to be a *raw* event count, at four times the limit as
+        /// an allowance for duplicates (upstream 999fae2). The allowance was
+        /// a guess, and a wrong one whenever a few directories churned hard:
+        /// the replay bailed on event volume alone and a perfectly usable
+        /// cache was discarded. Counting distinct directories needs no
+        /// allowance. Stored here so the C callback below never references
+        /// outer statics (which the Swift 6.3 frontend crashes on).
+        let changeLimit = maxUsefulChanges
+
+        var distinctCount: Int { changedDirectories.count + subtreesToRescan.count }
 
         private struct Waiter {
             var continuation: CheckedContinuation<Bool, Never>?
@@ -77,7 +88,7 @@ enum FSEventsChangeJournal {
         }
 
         /// Whether the outcome is already latched. The callback checks this
-        /// before mutating `changes`/`unreliable`: after HistoryDone the
+        /// before mutating the path sets or `unreliable`: after HistoryDone the
         /// stream is still live and keeps delivering current events, which
         /// must not race the resumed task's reads.
         var isFinished: Bool {
@@ -161,12 +172,12 @@ enum FSEventsChangeJournal {
                 let normalized = path.hasSuffix("/") && path.count > 1
                     ? String(path.dropLast()) : path
                 if flags & UInt32(kFSEventStreamEventFlagMustScanSubDirs) != 0 {
-                    collector.changes.subtreesToRescan.append(normalized)
+                    collector.subtreesToRescan.insert(normalized)
                 } else {
-                    collector.changes.changedDirectories.append(normalized)
+                    collector.changedDirectories.insert(normalized)
                 }
             }
-            if collector.changes.totalCount > collector.earlyBailChangeCount {
+            if collector.distinctCount > collector.changeLimit {
                 collector.finish(completed: false)
             }
         }
@@ -217,22 +228,22 @@ enum FSEventsChangeJournal {
         // Barrier on the callback queue: a callback that was already
         // executing when the outcome latched may still be mid-append. After
         // this, the collector is quiescent and its writes are visible here.
-        let (accumulated, unreliable) = queue.sync {
-            (collector.changes, collector.unreliable)
+        let (directories, subtrees, unreliable) = queue.sync {
+            (collector.changedDirectories, collector.subtreesToRescan, collector.unreliable)
         }
 
         guard completed, !unreliable,
-              accumulated.totalCount <= maxUsefulChanges else {
+              directories.count + subtrees.count <= maxUsefulChanges else {
             return nil
         }
-        // Dedup, and order parents before children so a new directory is
-        // adopted by its ancestor before its own event is processed.
-        var changes = accumulated
-        changes.changedDirectories = Array(Set(changes.changedDirectories)).sorted {
-            $0.components(separatedBy: "/").count < $1.components(separatedBy: "/").count
-        }
-        changes.subtreesToRescan = Array(Set(changes.subtreesToRescan))
-        return changes
+        // Order parents before children so a new directory is adopted by its
+        // ancestor before its own event is processed.
+        return Changes(
+            changedDirectories: directories.sorted {
+                $0.components(separatedBy: "/").count < $1.components(separatedBy: "/").count
+            },
+            subtreesToRescan: Array(subtrees)
+        )
     }
 
     /// The event ID marking "now"; capture before a scan starts so any

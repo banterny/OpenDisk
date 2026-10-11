@@ -274,6 +274,11 @@ final class ScanEngine: DiskScanning {
         // Captured before any reading so changes made during this scan
         // replay into the next one.
         let startEventID = FSEventsChangeJournal.currentEventID
+        // Taken *after* the event ID, so anything born later than this date
+        // is certain to have its creation in the journal replayed next time
+        // — the property `IncrementalUpdater`'s hard-link rule depends on.
+        // (Ported from upstream d987b27.)
+        let startedAt = Date()
 
         // The replay needs only the header's event ID, so it starts
         // immediately — concurrent with the (much heavier) tree decode —
@@ -281,13 +286,21 @@ final class ScanEngine: DiskScanning {
         // where nothing is being counted; the phase marker lets the status
         // bar say so instead of showing a dead "Scanning…".
         // (Ported from upstream 999fae2.)
-        if let header = ScanCache.peek(forRoot: path) {
+        if let (header, fileBytes) = ScanCache.peek(forRoot: path) {
             metrics.setPhase(.checkingChanges)
             // Pure async suspension — no thread is blocked while the
             // journal streams HistoryDone, bails, or times out.
             async let pendingChanges = FSEventsChangeJournal.changes(
                 since: header.eventID, under: path,
-                timeout: replayTimeBudget(cacheFileBytes: header.fileBytes)
+                timeout: replayTimeBudget(
+                    // The measured duration when there is one; otherwise the
+                    // old estimate from the cache file's size (~50 serialized
+                    // bytes per node, traversal reads ~200k nodes/s ⇒ ~10 MB
+                    // of cache per scan-second).
+                    expectedFullScanSeconds: header.fullScanSeconds > 0
+                        ? header.fullScanSeconds
+                        : Double(fileBytes) / 10_000_000
+                )
             )
             // Deserializing a saved tree is heavy: off the cooperative pool.
             let cached = await offload { ScanCache.load(forRoot: path) }
@@ -307,12 +320,20 @@ final class ScanEngine: DiskScanning {
                         IncrementalUpdater.apply(
                             changes, to: live, rootPath: path,
                             allowedDevices: allowedDevices,
+                            newInodesSince: cached.header.capturedAt,
                             metrics: metrics, isCancelled: isCancelled
                         )
                     }
                     if applied {
                         let tree = live.withLock { $0 }
-                        saveCacheInBackground(tree: tree, rootPath: path, eventID: startEventID)
+                        // An incremental update says nothing new about how
+                        // long a full traversal takes: carry the last
+                        // measurement forward rather than overwrite it with
+                        // this (much shorter) run.
+                        saveCacheInBackground(tree: tree, rootPath: path, header: ScanCache.Header(
+                            eventID: startEventID, capturedAt: startedAt,
+                            fullScanSeconds: header.fullScanSeconds
+                        ))
                         return tree
                     }
                 }
@@ -325,6 +346,8 @@ final class ScanEngine: DiskScanning {
         }
 
         // Full scan/traversal is the multi-second bulk: off the cooperative pool.
+        let clock = ContinuousClock()
+        let traversalStart = clock.now
         let tree = await offload {
             traverse(
                 path: path, rootName: rootName, allowedDevices: allowedDevices,
@@ -333,32 +356,38 @@ final class ScanEngine: DiskScanning {
             )
         }
         if !isCancelled() {
-            saveCacheInBackground(tree: tree, rootPath: path, eventID: startEventID)
+            saveCacheInBackground(tree: tree, rootPath: path, header: ScanCache.Header(
+                eventID: startEventID, capturedAt: startedAt,
+                fullScanSeconds: (clock.now - traversalStart) / .seconds(1)
+            ))
         }
         return tree
     }
 
     /// How long the journal replay may run before the engine gives up and
-    /// full-scans: a small fraction of what the full scan itself would
-    /// cost, so the incremental path can never lose much even when the
-    /// journal turns out useless. The full-scan cost is estimated from the
-    /// cache file's size (~50 serialized bytes per node, traversal reads
-    /// ~200k nodes/s ⇒ ~10 MB of cache per scan-second), taking a fifth of
-    /// that. Small scans wait at most a second; even a whole-disk,
-    /// multi-million-node scan waits at most a few — nothing like the
-    /// fixed 10s this replaced. (Ported from upstream 999fae2.)
-    private static func replayTimeBudget(cacheFileBytes: Int) -> TimeInterval {
-        let estimatedFullScanSeconds = Double(cacheFileBytes) / 10_000_000
-        return min(4, max(1, estimatedFullScanSeconds / 5))
+    /// full-scans: half of what the full scan itself is expected to cost,
+    /// between 2 and 30 seconds.
+    ///
+    /// This was a fifth of an *estimated* scan time, capped at 4s (upstream
+    /// 999fae2). Upstream then raised it ("update to increase cache usage"):
+    /// with so short a cap the replay could time out on a large root before
+    /// the journal finished streaming its history, and the engine fell back
+    /// to a full scan costing many times more than the wait it had saved.
+    /// Waiting up to half a full scan still cannot lose much when the
+    /// journal turns out useless. The trade-off is upstream's judgement and
+    /// has not been re-benchmarked in this fork. (Ported from upstream
+    /// d987b27.)
+    private static func replayTimeBudget(expectedFullScanSeconds: TimeInterval) -> TimeInterval {
+        min(30, max(2, expectedFullScanSeconds * 0.5))
     }
 
     /// Serializing a multi-million-node tree takes hundreds of
     /// milliseconds; keep it off the scan's critical path.
     private static func saveCacheInBackground(
-        tree: FileTree, rootPath: String, eventID: UInt64
+        tree: FileTree, rootPath: String, header: ScanCache.Header
     ) {
         DispatchQueue.global(qos: .utility).async {
-            ScanCache.save(tree: tree, forRoot: rootPath, eventID: eventID)
+            ScanCache.save(tree: tree, forRoot: rootPath, header: header)
         }
     }
 

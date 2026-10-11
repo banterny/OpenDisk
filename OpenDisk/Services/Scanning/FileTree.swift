@@ -101,6 +101,46 @@ struct FileTree: Sendable {
         Set(hardLinks.values.map(\.key))
     }
 
+    /// Every node carrying a hard-link record, with its inode identity —
+    /// for callers that must judge each link by where it sits on disk, not
+    /// just by which inodes are present. (Ported from upstream d987b27.)
+    var hardLinkedNodes: [(id: NodeID, key: HardLinkKey)] {
+        hardLinks.map { ($0.key, $0.value.key) }
+    }
+
+    /// Reachable files allocating at least `minimum` bytes.
+    ///
+    /// A hard-linked file whose node holds a zero share (a repeat sighting)
+    /// is judged by its record's full allocated size instead: which link
+    /// carries the bytes is an accident of scan order, and the file is just
+    /// as large whichever one this is. (Ported from upstream d987b27.)
+    func reachableFiles(allocatedAtLeast minimum: Int64) -> [NodeID] {
+        let reachable = reachabilityBitmap()
+        var result: [NodeID] = []
+        for index in nodes.indices where reachable[index] && !nodes[index].isDirectory {
+            let size = nodes[index].size
+            let id = NodeID(index)
+            if size >= minimum || (size == 0 && (hardLinks[id]?.allocatedSize ?? 0) >= minimum) {
+                result.append(id)
+            }
+        }
+        return result
+    }
+
+    /// Sets a file's allocated size after re-measuring it on disk. For a
+    /// hard link the *record* is updated and the node's share is left for
+    /// `normalizeHardLinks()` to re-derive — writing the node directly
+    /// would count the bytes once per link. Call before
+    /// `normalizeHardLinks()` and `rollUpDirectorySizes()`.
+    /// (Ported from upstream d987b27.)
+    mutating func updateAllocatedSize(of id: NodeID, to size: Int64) {
+        if let link = hardLinks[id] {
+            hardLinks[id] = HardLink(key: link.key, allocatedSize: size)
+        } else {
+            nodes[Int(id)].size = size
+        }
+    }
+
     /// Re-derives per-node hard-link sizes deterministically: the lowest-ID
     /// reachable node per inode keeps the full allocated size, every other
     /// sighting counts 0, and records for unreachable (spliced-away) nodes
