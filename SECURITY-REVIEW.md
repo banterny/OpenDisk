@@ -544,8 +544,8 @@ Security-relevant consequences of what *was* ported:
 
 ## 🔄 Upstream ports (Oct 2026)
 
-Upstream moved from `70a67e3` to `f7551cf` (v1.2.2 → v1.2.8, 17 commits). All
-17 were read. None reintroduces anything the fixes above removed: there is no
+Upstream moved from `70a67e3` to `f7551cf` (v1.2.2 → v1.2.8, 18 commits). All
+18 were read. None reintroduces anything the fixes above removed: there is no
 new network code, no new `Process` use outside `MoveToApplications` (which
 this fork does not have), and no change to `ProtectedPaths` or the deletion
 path. Upstream still ships Sparkle and still compares paths as raw strings.
