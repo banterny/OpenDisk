@@ -113,3 +113,10 @@ fork kept them, so nearly every hunk conflicts. What has worked is
 `git cherry-pick -n <commit>` one commit at a time, restoring
 `OpenDisk.xcodeproj` and `OpenDisk-Info.plist` from `HEAD` after each, then
 reading every hunk. Last reviewed upstream commit: `f7551cf` (v1.2.8).
+
+After a port, update what the About box says, in `project.pbxproj` for both
+app targets: `MARKETING_VERSION` tracks the upstream release the fork has been
+reviewed up to (it is *not* a claim to be that release — see the "not ported"
+lists in `SECURITY-REVIEW.md`), `CURRENT_PROJECT_VERSION` is the fork's own
+build counter, and `INFOPLIST_KEY_NSHumanReadableCopyright` carries the fork
+notice with the reviewed upstream version and commit.
