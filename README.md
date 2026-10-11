@@ -23,6 +23,7 @@ A fast, free, and **open-source** disk space analyzer for macOS — an open alte
 > - **No auto-updater.** Upstream bundled Sparkle pointed at `opendisk.app` and signed with upstream's key, so a reviewed build would replace itself with an unreviewed one. Update this fork with `git pull` and rebuild.
 > - **Deletion moves to the Trash by default.** Permanent deletion is a Settings toggle, off by default.
 > - **The protected-path guard was bypassable** via the `/System/Volumes/Data` firmlink — the same path that names your home folder. Fixed, with tests.
+> - **Dragging a file out of the app can only copy it.** Upstream also lets the receiving app move it, so a drag onto a Finder window can relocate a file, and a drag onto the Dock's Trash bins it — with no confirmation and no protected-path check. Here Finder copies and the Trash refuses the drop; deleting goes through the Collector only.
 > - **Build it yourself**: open `OpenDisk.xcodeproj` in Xcode 26+ and run. Requires macOS 26 (Tahoe). The download link below is upstream's binary, not this fork.
 > - **Signing**: the project carries no Team ID. To sign with your own, create `Local.xcconfig` (gitignored) as described in [`Signing.xcconfig`](Signing.xcconfig). Without it the project still builds and tests unsigned via `CODE_SIGNING_ALLOWED=NO`.
 
