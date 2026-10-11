@@ -172,10 +172,20 @@ struct DiskAnalysisView: View {
             scanAccess.beginAccess(toPath: rootPath)
             Task { await analyzer.scanDirectory(rootPath) }
         }
-        // Volume capacity for the status bar: read once up front and again
-        // whenever a scan ends (a rescan after deleting files is the moment
-        // the user looks for the freed space). (Ported from upstream d628684.)
-        .task(id: rootPath) { await refreshVolumeCapacity() }
+        // Volume capacity for the status bar. Polled, not read once: free
+        // space moves while the window just sits there (macOS reclaiming
+        // purgeable space, other apps writing), and a figure that only
+        // refreshed when a scan ended drifted visibly from Finder's
+        // (upstream issue #9). The read is two resource values off the main
+        // thread, and the state is only written when the figure changes, so
+        // an idle window re-renders nothing. (Ported from upstream d628684
+        // and 628c2e5.)
+        .task(id: rootPath) {
+            while !Task.isCancelled {
+                await refreshVolumeCapacity()
+                try? await Task.sleep(for: .seconds(2))
+            }
+        }
         .onChange(of: analyzer.isScanning) { _, isScanning in
             if !isScanning { Task { await refreshVolumeCapacity() } }
         }
@@ -634,9 +644,10 @@ struct DiskAnalysisView: View {
 
     private func refreshVolumeCapacity() async {
         let path = rootPath
-        volumeCapacity = await Task.detached(priority: .utility) {
+        let capacity = await Task.detached(priority: .utility) {
             DeviceMonitor.volumeCapacity(ofPath: path)
         }.value
+        if capacity != volumeCapacity { volumeCapacity = capacity }
     }
 
     // MARK: - Window title
