@@ -11,6 +11,23 @@ enum HiddenSpaceInfo {
     static var sentinelPath: String { "::" + folderName }
 }
 
+/// Naming for the synthetic "Free Space" wedge on the chart: the unused
+/// part of the volume, drawn beside the scanned folders so the ring reads as
+/// the whole disk rather than only what is on it. (Upstream issue #11;
+/// ported from upstream ccc37cd and 80e91c7.)
+///
+/// Like every "::" path it names nothing on disk. The chart treats it as a
+/// `.synthetic` segment, which is what keeps it from being dragged, opened,
+/// or offered a file menu.
+enum FreeSpaceInfo {
+    static let name = "Free Space"
+    static var sentinelPath: String { "::" + name }
+    /// Settings toggle. On by default; worth turning off on a large,
+    /// mostly empty drive, where the wedge would squeeze every scanned
+    /// folder into a sliver.
+    static let defaultsKey = "chart_show_free_space"
+}
+
 /// Curated cache locations that are safe to clear: caches that macOS or
 /// the owning tool rebuilds (or re-downloads) on demand. Shown inside the
 /// synthetic "Purgeable Space" folder with their scanned sizes.

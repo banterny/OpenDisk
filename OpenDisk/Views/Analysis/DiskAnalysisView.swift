@@ -47,6 +47,7 @@ struct DiskAnalysisView: View {
     /// bar; re-read when a scan ends so deletions and the like show up.
     /// (Ported from upstream d628684.)
     @State private var volumeCapacity: VolumeCapacity?
+    @AppStorage(FreeSpaceInfo.defaultsKey) private var showFreeSpace = true
 
     init(
         rootPath: String,
@@ -563,6 +564,7 @@ struct DiskAnalysisView: View {
                 if let chartRoot = analyzer.chartRoot {
                     RingsChartView(
                         root: chartRoot,
+                        freeBytes: chartFreeBytes,
                         onSelectDirectory: navigateToPath,
                         onSelectCenter: goBack
                     )
@@ -601,6 +603,17 @@ struct DiskAnalysisView: View {
                 perform: handleCollectorDrop
             )
         )
+    }
+
+    /// Free space to draw on the chart, or nil for no wedge. Only at the
+    /// scan root: deeper down the ring shows one folder, and "free space on
+    /// the disk" is not a part of a folder. Uses `available` (free plus
+    /// purgeable), so the wedge agrees with the status bar and with Finder.
+    private var chartFreeBytes: Int64? {
+        guard showFreeSpace, currentPath == rootPath,
+              let capacity = volumeCapacity, capacity.available > 0
+        else { return nil }
+        return capacity.available
     }
 
     /// Handles a drop on the chart pane. `files` comes from the in-process

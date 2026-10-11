@@ -39,7 +39,12 @@ enum RingsChartLayout {
     struct Layout: Equatable {
         let center: CGPoint
         let ringThickness: CGFloat
-        /// Root first, then outer rings in traversal order.
+        /// The free space drawn as a wedge, or nil when there is none — kept
+        /// on the layout so the center label can quote it without the view
+        /// threading the figure through separately.
+        let freeBytes: Int64?
+        /// Root first, then outer rings in traversal order; the free-space
+        /// wedge, when present, is last.
         let segments: [Segment]
 
         /// The segment under `point`, or nil over empty space.
@@ -60,17 +65,42 @@ enum RingsChartLayout {
         }
     }
 
-    static func layout(root: ChartItem, in size: CGSize) -> Layout {
+    static func layout(root: ChartItem, in size: CGSize, freeBytes: Int64? = nil) -> Layout {
         let center = CGPoint(x: size.width / 2, y: size.height / 2)
         let maxRadius = max(min(size.width, size.height) / 2 - padding, 1)
         let thickness = maxRadius / CGFloat(ChartItem.maxDepth + 1)
 
+        // With free space shown, the full circle stands for used + free and
+        // the scanned tree is squeezed into its share; the remainder becomes
+        // one synthetic wedge on the innermost ring. Without it the tree
+        // takes the whole circle, exactly as before.
+        // (Ported from upstream ccc37cd.)
+        let free = max(freeBytes ?? 0, 0)
+        let total = Double(root.size) + Double(free)
+        let usedSweep = free > 0 && total > 0
+            ? 2 * .pi * Double(root.size) / total
+            : 2 * .pi
+
         var segments: [Segment] = []
         appendSegments(
-            of: root, startAngle: 0, sweep: 2 * .pi,
+            of: root, startAngle: 0, sweep: usedSweep,
             thickness: thickness, into: &segments
         )
-        return Layout(center: center, ringThickness: thickness, segments: segments)
+        if free > 0 {
+            segments.append(Segment(
+                path: FreeSpaceInfo.sentinelPath, name: FreeSpaceInfo.name,
+                size: free, kind: .synthetic, depth: 1,
+                fractionOfRoot: Double(free) / total,
+                hasHiddenChildren: false,
+                startAngle: usedSweep, sweep: 2 * .pi - usedSweep,
+                innerRadius: thickness, outerRadius: thickness * 2,
+                colorPosition: 0
+            ))
+        }
+        return Layout(
+            center: center, ringThickness: thickness,
+            freeBytes: free > 0 ? free : nil, segments: segments
+        )
     }
 
     private static func appendSegments(
