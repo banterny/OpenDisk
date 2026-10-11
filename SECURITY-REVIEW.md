@@ -262,7 +262,7 @@ is a plausible-looking row like `Documents` that the user confirms.
 payload is offered. The reasoning is from the declared UTI, and the fix is cheap
 enough that confirming first was not worth it.
 
-**Fix applied:** a custom exported UTI, `app.opendisk.collected-files`, declared
+**Fix applied:** a custom exported UTI, `ideals.OpenDisk.collected-files`, declared
 in `Info.plist` and conforming to `public.json`. The drag payload now uses that
 type, so a plain `.json` file no longer matches the drop target. In-app drags are
 unaffected.
