@@ -44,7 +44,7 @@ struct RingsChartView: View {
                 }
             }
             // simultaneousGesture (not onTapGesture) so a click doesn't
-            // exclusively capture the gesture and starve `.draggable` — the
+            // exclusively capture the gesture and starve the drag — the
             // same fix the folder rows use.
             .simultaneousGesture(
                 SpatialTapGesture().onEnded { value in
@@ -57,11 +57,15 @@ struct RingsChartView: View {
                 }
             )
             // Drag a ring into the Collector — reuses the folder rows' exact
-            // payload type, drop pipeline and protected-path blockers.
-            .draggable(draggableGroup) {
-                segmentDragPreview
-                    .onAppear { collector.flagDraggedProtected(draggedProtectedReason) }
-                    .onDisappear { collector.flagDraggedProtected(nil) }
+            // drag source, drop pipeline and protected-path blockers. The
+            // segment is looked up at the gesture's start point rather than
+            // from hover state, which can lag a fast press-and-drag.
+            .fileDrag { location in
+                draggableSegment(at: location).map { [collectedFile(for: $0)] } ?? []
+            } onBegin: { files in
+                collector.flagDraggedProtected(protectedReason(for: files))
+            } onEnd: { _ in
+                collector.flagDraggedProtected(nil)
             }
             // Right-click a ring for the same actions as a list row.
             .contextMenu {
@@ -125,20 +129,21 @@ struct RingsChartView: View {
     /// (not the center disk, not a synthetic slice).
     private var draggableSegment: RingsChartLayout.Segment? {
         guard let hoveredPath,
-              let segment = layout?.segments.first(where: { $0.path == hoveredPath }),
-              segment.depth >= 1,
-              segment.kind == .directory || segment.kind == .file
+              let segment = layout?.segments.first(where: { $0.path == hoveredPath })
         else { return nil }
+        return isDraggable(segment) ? segment : nil
+    }
+
+    private func draggableSegment(at location: CGPoint) -> RingsChartLayout.Segment? {
+        guard let segment = layout?.segment(at: location), isDraggable(segment) else { return nil }
         return segment
     }
 
-    /// The drag payload — the exact type folder rows use, so the Collector's
-    /// drop handler, size accounting and protection all work unchanged. Empty
-    /// when nothing collectable is under the pointer, so a stray drag from the
-    /// center disk or a gap is a harmless no-op.
-    private var draggableGroup: CollectedFileGroup {
-        guard let segment = draggableSegment else { return CollectedFileGroup(files: []) }
-        return CollectedFileGroup(files: [collectedFile(for: segment)])
+    /// A real file/folder ring — not the center disk, not a synthetic
+    /// slice. A drag that starts anywhere else carries nothing, so a stray
+    /// drag from the center or a gap is a harmless no-op.
+    private func isDraggable(_ segment: RingsChartLayout.Segment) -> Bool {
+        segment.depth >= 1 && (segment.kind == .directory || segment.kind == .file)
     }
 
     private func collectedFile(for segment: RingsChartLayout.Segment) -> CollectedFile {
@@ -148,30 +153,16 @@ struct RingsChartView: View {
         )
     }
 
-    /// Why the hovered ring can't be collected (macOS-protected), phrased to
+    /// Why a dragged ring can't be collected (macOS-protected), phrased to
     /// follow its name — drives the Collector's pre-drop "can't delete" state,
     /// identical to a protected folder row.
-    private var draggedProtectedReason: String? {
-        guard let segment = draggableSegment,
-              let reason = ProtectedPaths.reason(for: segment.path) else { return nil }
-        return "“\(segment.name)” \(reason)"
-    }
-
-    @ViewBuilder
-    private var segmentDragPreview: some View {
-        if let segment = draggableSegment {
-            HStack(spacing: 6) {
-                Image(nsImage: FileIcon.icon(for: segment.path))
-                    .resizable()
-                    .frame(width: 16, height: 16)
-                Text(segment.name).lineLimit(1)
-                Text(ByteFormatter.formatFileSize(segment.size))
-                    .foregroundStyle(.secondary)
-                    .monospacedDigit()
+    private func protectedReason(for files: [CollectedFile]) -> String? {
+        for file in files {
+            if let reason = ProtectedPaths.reason(for: file.path) {
+                return "“\(file.name)” \(reason)"
             }
-            .padding(.horizontal, 8)
-            .padding(.vertical, 5)
         }
+        return nil
     }
 
     // MARK: - Hover overlay

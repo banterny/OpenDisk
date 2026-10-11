@@ -149,15 +149,7 @@ struct DiskAnalysisView: View {
                 }
             }
             ToolbarItem(placement: .primaryAction) {
-                Button("Refresh", systemImage: "arrow.clockwise") {
-                    // Refreshing inside the synthetic purgeable view
-                    // rescans the disk it belongs to.
-                    Task {
-                        await analyzer.scanDirectory(
-                            currentPath.hasPrefix("::") ? rootPath : currentPath
-                        )
-                    }
-                }
+                Button("Refresh", systemImage: "arrow.clockwise", action: refresh)
                 .keyboardShortcut("r", modifiers: .command)
                 .help("Rescan the current folder")
             }
@@ -579,26 +571,58 @@ struct DiskAnalysisView: View {
             }
         }
         // Dropping anywhere on the chart side collects the file; the collector
-        // bar lights up while a drag hovers. Dragging the "Purgeable Space"
-        // row expands to its real, deletable cache folders (its size is the
-        // sum of those, so the collected total matches).
-        .dropDestination(for: CollectedFileGroup.self) { groups, _ in
-            let expanded = groups.flatMap(\.files).flatMap { file in
-                file.path == HiddenSpaceInfo.sentinelPath
-                    ? analyzer.collectablePurgeableFiles()
-                    : [file]
-            }
-            // The drag ended here — clear the "can't delete" flag right away.
-            collector.flagDraggedProtected(nil)
-            // Refuse macOS-protected items outright: the drop bounces back
-            // (the Collector already showed why while it was hovering).
-            let allowed = expanded.filter { ProtectedPaths.reason(for: $0.path) == nil }
-            guard !allowed.isEmpty else { return false }
-            collector.add(allowed)
-            // Collected rows leave the list; don't leave ghost selections.
-            selectedPaths.subtract(allowed.map(\.path))
+        // bar lights up while a drag hovers. The named space lets the
+        // Collector tell a drop back onto itself (keep) from a drop elsewhere
+        // in this pane (remove) when one of its own items is dragged out.
+        .coordinateSpace(.collectorDrop)
+        // `.fileURL` is listed only so drags of real files are offered here
+        // at all — `InAppFileDropDelegate` then refuses anything that did not
+        // start inside this app, and never reads the pasteboard. (H4)
+        .onDrop(
+            of: [.fileURL, .openDiskCollectedFiles],
+            delegate: InAppFileDropDelegate(
+                onTargetChange: { isCollectorTargeted = $0 },
+                perform: handleCollectorDrop
+            )
+        )
+    }
+
+    /// Handles a drop on the chart pane. `files` comes from the in-process
+    /// drag source, never from the pasteboard (see `InAppFileDropDelegate`).
+    /// (Ported from upstream e9a1158/43e4967.)
+    private func handleCollectorDrop(_ files: [CollectedFile], at location: CGPoint) -> Bool {
+        // One of the Collector's own items coming back: this is a "take it
+        // out of the Collector" gesture, not a new collection.
+        if collector.draggingOut != nil {
+            collector.resolveDragOut(droppedAt: location)
             return true
-        } isTargeted: { isCollectorTargeted = $0 }
+        }
+        // Dragging the "Purgeable Space" row expands to its real, deletable
+        // cache folders (its size is the sum of those, so the collected
+        // total matches).
+        let expanded = files.flatMap { file in
+            file.path == HiddenSpaceInfo.sentinelPath
+                ? analyzer.collectablePurgeableFiles()
+                : [file]
+        }
+        // The drag ended here — clear the "can't delete" flag right away.
+        collector.flagDraggedProtected(nil)
+        // Refuse macOS-protected items outright: the drop bounces back
+        // (the Collector already showed why while it was hovering).
+        let allowed = expanded.filter { ProtectedPaths.reason(for: $0.path) == nil }
+        guard !allowed.isEmpty else { return false }
+        collector.add(allowed)
+        // Collected rows leave the list; don't leave ghost selections.
+        selectedPaths.subtract(allowed.map(\.path))
+        return true
+    }
+
+    private func refresh() {
+        // Refreshing inside the synthetic purgeable view rescans the disk
+        // it belongs to.
+        Task {
+            await analyzer.scanDirectory(currentPath.hasPrefix("::") ? rootPath : currentPath)
+        }
     }
 
     /// Fraction of the device's used space scanned so far, or nil (an

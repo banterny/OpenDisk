@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import Observation
 
@@ -22,6 +23,17 @@ final class Collector {
     /// Live progress while `deleteAll()` runs, so the tray can show what's
     /// being removed and how much has been freed so far (nil when idle).
     private(set) var deletionProgress: DeletionProgress?
+
+    /// Items currently being dragged *out* of the Collector (nil when no
+    /// such drag is in flight). Dragging out only ever un-collects: these
+    /// drags carry no file URL, so nothing on disk can be moved, copied or
+    /// removed by one. (Ported from upstream e9a1158.)
+    private(set) var draggingOut: [CollectedFile]?
+    /// The Collector's own on-screen frames, in the `.collectorDrop` space:
+    /// a drag-out released inside one of these means "never mind, keep it".
+    /// Not observed — it changes on every layout pass and drives no view.
+    @ObservationIgnored var keepZones: [String: CGRect] = [:]
+    private var dragOutTask: Task<Void, Never>?
 
     struct DeletionProgress: Equatable {
         /// Name of the item currently being removed.
@@ -99,6 +111,48 @@ final class Collector {
             guard !Task.isCancelled else { return }
             self?.draggedProtectedReason = nil
         }
+    }
+
+    // MARK: - Dragging items back out
+
+    func beginDragOut(_ files: [CollectedFile]) {
+        dragOutTask?.cancel()
+        draggingOut = files.filter { contains(path: $0.path) }
+    }
+
+    /// The drag session ended. An empty operation means nothing accepted the
+    /// drop — it was released over empty space or another app — which is the
+    /// "drag it out to discard" gesture, so the items leave the Collector.
+    ///
+    /// A non-empty operation means a drop target took it, and inside this app
+    /// that target is the chart pane, which calls `resolveDragOut(droppedAt:)`
+    /// itself. AppKit does not promise which of the two callbacks arrives
+    /// first, so rather than resolve here the state is left for the drop
+    /// handler, with a short timeout that clears it if none ever claims it.
+    func endDragOut(operation: NSDragOperation) {
+        guard draggingOut != nil else { return }
+        guard operation.isEmpty else {
+            let pending = draggingOut
+            dragOutTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(2))
+                guard !Task.isCancelled, let self, self.draggingOut == pending else { return }
+                self.draggingOut = nil
+            }
+            return
+        }
+        resolveDragOut(droppedAt: nil)
+    }
+
+    /// Settles a drag-out: released back over the Collector keeps the items,
+    /// anywhere else removes them from the Collector (undoably). Never
+    /// touches the files themselves.
+    func resolveDragOut(droppedAt location: CGPoint?) {
+        dragOutTask?.cancel()
+        guard let files = draggingOut else { return }
+        draggingOut = nil
+        if let location, keepZones.values.contains(where: { $0.contains(location) }) { return }
+        let paths = Set(files.map(\.path))
+        recordingUndo { items.removeAll { paths.contains($0.path) } }
     }
 
     func remove(_ file: CollectedFile) { recordingUndo { items.removeAll { $0.path == file.path } } }

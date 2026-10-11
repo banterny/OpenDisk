@@ -7,6 +7,13 @@ import Quartz
 /// hovering reveals the collected-file list, which floats *upward* over the
 /// chart — anchored just above the footer so it never covers the controls or
 /// resizes the graph.
+extension CoordinateSpaceProtocol where Self == NamedCoordinateSpace {
+    /// The chart pane, in which both the Collector's own frames ("keep
+    /// zones") and drop locations are measured — see
+    /// `Collector.resolveDragOut(droppedAt:)`.
+    static var collectorDrop: Self { .named("collectorDrop") }
+}
+
 struct CollectorBar: View {
     let collector: Collector
     /// True while a drag is hovering the drop target — drives the highlight.
@@ -41,7 +48,15 @@ struct CollectorBar: View {
     /// Drives `listVisible` through a short close delay so crossing the small
     /// gap between the footer and the floating list doesn't collapse it.
     private var wantsList: Bool {
-        phase == .idle && !collector.isEmpty && (footerHovered || listHovered || isTargeted)
+        phase == .idle && !collector.isEmpty && collector.draggingOut == nil
+            && (footerHovered || listHovered || isTargeted)
+    }
+
+    /// A drag is over the tray *and* it is an incoming one. While one of the
+    /// Collector's own items is being dragged out, the tray is a place to
+    /// put it back, not a place that is collecting — so it doesn't light up.
+    private var collecting: Bool {
+        isTargeted && collector.draggingOut == nil
     }
 
     /// A macOS-protected item is being dragged: the tray refuses it and says so
@@ -60,6 +75,9 @@ struct CollectorBar: View {
 
     var body: some View {
         footerBar
+            .onGeometryChange(for: CGRect.self) {
+                $0.frame(in: .collectorDrop)
+            } action: { collector.keepZones["footer"] = $0 }
             .onHover { footerHovered = $0 }
             .onGeometryChange(for: CGFloat.self) { $0.size.height } action: { footerHeight = $0 }
             // Floating layers are anchored to the footer's bottom, then pushed
@@ -68,6 +86,10 @@ struct CollectorBar: View {
             .overlay(alignment: .bottom) {
                 if listVisible {
                     listPanel
+                        .onGeometryChange(for: CGRect.self) {
+                            $0.frame(in: .collectorDrop)
+                        } action: { collector.keepZones["list"] = $0 }
+                        .onDisappear { collector.keepZones["list"] = nil }
                         .onHover { listHovered = $0 }
                         .offset(y: -(footerHeight + 8))
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
@@ -79,6 +101,12 @@ struct CollectorBar: View {
                         .offset(y: -(footerHeight + 8))
                         .transition(.opacity.combined(with: .move(edge: .bottom)))
                 }
+            }
+            // Dragging an item out starts under the pointer, so the hover
+            // regions would otherwise stay "entered" for the whole drag and
+            // pin the list open over the very area the user is dragging to.
+            .onChange(of: collector.draggingOut == nil) { _, idle in
+                if !idle { listHovered = false; footerHovered = false }
             }
             // Open immediately, close after a short delay: moving the pointer
             // from the footer up to the list (or back) crosses an 8pt gap that
@@ -98,7 +126,7 @@ struct CollectorBar: View {
             .padding(.horizontal, 12)
             .padding(.bottom, 10)
             .animation(.spring(duration: 0.3), value: listVisible)
-            .animation(.easeInOut(duration: 0.15), value: isTargeted)
+            .animation(.easeInOut(duration: 0.15), value: collecting)
             .animation(.spring(duration: 0.3), value: collector.count)
             .animation(.spring(duration: 0.3), value: phase)
             .animation(.spring(duration: 0.3), value: collector.blockedNotice)
@@ -141,12 +169,12 @@ struct CollectorBar: View {
                 .padding(.vertical, 10)
                 .glassEffect(
                     rejecting ? .regular.tint(.red)
-                        : (isTargeted ? .regular.tint(.accentColor) : .regular),
+                        : (collecting ? .regular.tint(.accentColor) : .regular),
                     in: shape
                 )
                 .overlay {
                     shape.strokeBorder(
-                        rejecting ? Color.red : (isTargeted ? Color.accentColor : .clear),
+                        rejecting ? Color.red : (collecting ? Color.accentColor : .clear),
                         lineWidth: 1.5
                     )
                 }
@@ -193,6 +221,12 @@ struct CollectorBar: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
+            .contentShape(Rectangle())
+            .fileDrag({ _ in collector.items }, exportsFileURLs: false) { files in
+                collector.beginDragOut(files)
+            } onEnd: { operation in
+                collector.endDragOut(operation: operation)
+            }
             Spacer()
             Button {
                 showConfirm = true
@@ -213,12 +247,12 @@ struct CollectorBar: View {
     /// which lights up while a drag is hovering.
     private var hintView: some View {
         HStack(spacing: 8) {
-            Image(systemName: isTargeted ? "arrow.down.circle.fill" : "arrow.down.circle.dotted")
-            Text(isTargeted ? "Release to collect" : "Drag files here to collect them for deletion")
+            Image(systemName: collecting ? "arrow.down.circle.fill" : "arrow.down.circle.dotted")
+            Text(collecting ? "Release to collect" : "Drag files here to collect them for deletion")
         }
         .font(.callout)
-        .fontWeight(isTargeted ? .semibold : .regular)
-        .foregroundStyle(isTargeted ? Color.accentColor : Color.secondary)
+        .fontWeight(collecting ? .semibold : .regular)
+        .foregroundStyle(collecting ? Color.accentColor : Color.secondary)
         .frame(maxWidth: .infinity)
         .padding(.vertical, 2)
     }
@@ -298,6 +332,7 @@ struct CollectorBar: View {
                     ForEach(collector.items) { file in
                         CollectedRow(
                             file: file,
+                            collector: collector,
                             onRemove: { collector.remove(file) },
                             onPreview: { previewItem = PreviewItem(url: file.url) }
                         )
@@ -353,6 +388,7 @@ private struct PreviewItem: Identifiable {
 /// Preview / Show in Finder / Open in Terminal / Remove context menu.
 private struct CollectedRow: View {
     let file: CollectedFile
+    let collector: Collector
     let onRemove: () -> Void
     let onPreview: () -> Void
 
@@ -393,6 +429,11 @@ private struct CollectedRow: View {
         .padding(.vertical, 4)
         .padding(.horizontal, 8)
         .contentShape(Rectangle())
+        .fileDrag({ _ in [file] }, exportsFileURLs: false) { files in
+            collector.beginDragOut(files)
+        } onEnd: { operation in
+            collector.endDragOut(operation: operation)
+        }
         .hoverHighlight(cornerRadius: 6)
         // Resolve the real Finder icon off the main thread; the row shows
         // a type icon meanwhile (same pattern as the folder rows).
