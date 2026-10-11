@@ -3,9 +3,9 @@ import SwiftUI
 import UniformTypeIdentifiers
 
 /// A file or folder the user has dragged into the Collector for deletion.
-/// A small value type so it can ride SwiftUI drag-and-drop as `Transferable`
+/// A small value type so it can ride a drag (see `FileDrag.swift`)
 /// and be handed to a background actor for the actual removal.
-struct CollectedFile: Codable, Transferable, Identifiable, Hashable, Sendable {
+struct CollectedFile: Codable, Identifiable, Hashable, Sendable {
     let path: String
     let name: String
     /// Aggregate on-disk size (for a directory, the whole subtree) as the
@@ -28,37 +28,24 @@ struct CollectedFile: Codable, Transferable, Identifiable, Hashable, Sendable {
     init(_ item: FolderItem) {
         self.init(path: item.path, name: item.name, size: item.size, isDirectory: item.isDirectory)
     }
-
-    static var transferRepresentation: some TransferRepresentation {
-        // App-private type, NOT bare `public.json` — see CollectedFileGroup.
-        // Also expose a fileURL proxy so an item can be dragged out to Finder.
-        CodableRepresentation(contentType: .openDiskCollectedFiles)
-        ProxyRepresentation(exporting: \.url)
-    }
 }
 
 extension UTType {
     /// The Collector's private drag payload type, exported in
     /// `OpenDisk-Info.plist` and conforming to `public.json`.
     ///
-    /// It must not be `public.json` itself. The Collector's drop target
-    /// decodes whatever payload it receives into a list of paths to delete,
-    /// and `public.json` is a system-wide type that every `.json` file on the
-    /// machine advertises — so any dragged file, from Finder or another app,
-    /// could decode straight into deletion candidates with an attacker-chosen
-    /// `path`. See SECURITY-REVIEW.md, finding H4.
+    /// It must not be `public.json` itself: that is a system-wide type every
+    /// `.json` file on the machine advertises, and this type marks a drag as
+    /// one the Collector may act on. See SECURITY-REVIEW.md, finding H4.
+    ///
+    /// Since the drag rewrite ported from upstream e9a1158/43e4967 the type
+    /// is carried only by in-app drags that have no real file behind them
+    /// (the hidden-space row, and items dragged back out of the Collector),
+    /// and the drop target no longer decodes it at all — it takes the files
+    /// from `FileDragSource.activeFiles`, in-process state no other app can
+    /// write. The type is kept private regardless, so the payload stays
+    /// meaningless to everything else. See `FileDrag.swift`.
     static let openDiskCollectedFiles = UTType(
         exportedAs: "ideals.OpenDisk.collected-files", conformingTo: .json
     )
-}
-
-/// One drag's worth of files: a multi-selection dragged together rides as
-/// a single payload (SwiftUI's `.draggable` carries one Transferable per
-/// row, so a group type is how several files travel in one gesture).
-struct CollectedFileGroup: Codable, Transferable, Sendable {
-    let files: [CollectedFile]
-
-    static var transferRepresentation: some TransferRepresentation {
-        CodableRepresentation(contentType: .openDiskCollectedFiles)
-    }
 }
