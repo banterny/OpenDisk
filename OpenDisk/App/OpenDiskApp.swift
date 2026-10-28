@@ -33,6 +33,9 @@ struct OpenDiskApp: App {
         // The sandboxed App Store build never uses Full Disk Access — it scans
         // folders/volumes the user grants — so there's nothing to prompt for.
         guard !ScanAccess.isSandboxed else { return }
+        // Hosting the test bundle: the alert's modal loop would stall every
+        // main-actor test until someone dismissed it.
+        guard !FullDiskAccess.isHostingTests() else { return }
         guard !hasCheckedFullDiskAccess else { return }
         hasCheckedFullDiskAccess = true
 

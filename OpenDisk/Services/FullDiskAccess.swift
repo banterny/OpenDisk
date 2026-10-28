@@ -68,6 +68,24 @@ enum FullDiskAccess {
         return probed > 0 && readable == probed
     }
 
+    /// Whether this process is only hosting the unit-test bundle.
+    ///
+    /// The test host is the app itself, and the startup alert's modal loop
+    /// blocks the main actor: with the alert up, every main-actor test waits
+    /// until someone clicks "Later". Xcode sets `XCTestConfigurationFilePath`
+    /// in the host's environment for every test run (pinned by
+    /// `FullDiskAccessTests`).
+    ///
+    /// An environment variable is something whoever launches the app
+    /// controls (compare M5), so this gates nothing that matters: setting
+    /// it only hides a reminder. Scans still check `isGranted` and still
+    /// show the "Full Disk Access Required" screen.
+    nonisolated static func isHostingTests(
+        environment: [String: String] = ProcessInfo.processInfo.environment
+    ) -> Bool {
+        environment["XCTestConfigurationFilePath"] != nil
+    }
+
     /// Relaunches the app — Full Disk Access only reaches a *freshly launched*
     /// process, so after the user turns it on we offer to quit and reopen.
     @MainActor
