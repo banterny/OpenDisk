@@ -39,6 +39,12 @@ enum IncrementalUpdater {
             known: tree.withLock { $0.hardLinkKeys }, capturedAt: capturedAt
         )
 
+        // One step per changed folder and per subtree, plus the large-file
+        // refresh at the end. (Ported from upstream d13954d.)
+        metrics.beginSteps(
+            total: changes.changedDirectories.count + changes.subtreesToRescan.count + 1
+        )
+
         for directoryPath in changes.changedDirectories {
             if isCancelled() { return false }
             let consistent = updateDirectory(
@@ -48,6 +54,7 @@ enum IncrementalUpdater {
                 metrics: metrics, isCancelled: isCancelled
             )
             guard consistent else { return false }
+            metrics.completeStep()
         }
 
         for subtreePath in changes.subtreesToRescan {
@@ -59,12 +66,14 @@ enum IncrementalUpdater {
                 metrics: metrics, isCancelled: isCancelled
             )
             guard consistent else { return false }
+            metrics.completeStep()
         }
 
         guard !isCancelled() else { return false }
         // Before normalizing: a re-measured hard link updates its record,
         // and normalization is what turns records back into node shares.
         refreshLargeFileSizes(in: tree)
+        metrics.completeStep()
         // Splicing adds re-read files at full size and can delete the node
         // that carried a link's bytes: re-derive per-node shares now, once,
         // before the caller rolls up.

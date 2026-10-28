@@ -44,6 +44,10 @@ final class DiskAnalyzer {
     /// What the running scan is doing; the status bar words the "no items
     /// counted yet" stretch with it. (Ported from upstream 999fae2.)
     private(set) var scanPhase: ScanPhase = .scanning
+    /// Progress through an incremental update (`.applyingChanges`).
+    /// (Ported from upstream d13954d.)
+    private(set) var scanStepsCompleted = 0
+    private(set) var scanStepsTotal = 0
     /// When the running scan started; views derive throughput from it.
     private(set) var scanStartDate: Date?
     private(set) var scanDuration: TimeInterval = 0
@@ -138,6 +142,8 @@ final class DiskAnalyzer {
         totalDiskScannedBytes = 0
         itemsScanned = 0
         scanPhase = .scanning
+        scanStepsCompleted = 0
+        scanStepsTotal = 0
         scanDuration = 0
         scanRootPath = path
         currentPath = path
@@ -347,6 +353,8 @@ final class DiskAnalyzer {
         totalDiskScannedBytes = progress.scannedBytes
         itemsScanned = progress.itemsScanned
         scanPhase = progress.phase
+        scanStepsCompleted = progress.stepsCompleted
+        scanStepsTotal = progress.stepsTotal
     }
 
     /// Re-materializes the on-screen rows from the current tree, keeping

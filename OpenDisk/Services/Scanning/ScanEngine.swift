@@ -313,7 +313,7 @@ final class ScanEngine: DiskScanning {
                 let live = Mutex(cached.tree)
                 registerPartial { live.withLock { $0 } }
                 let changes = await pendingChanges
-                metrics.setPhase(.scanning)
+                metrics.setPhase(changes == nil ? .scanning : .applyingChanges)
                 if let changes {
                     // Splicing up to 40k changed directories is heavy work.
                     let applied = await offload {
@@ -326,6 +326,13 @@ final class ScanEngine: DiskScanning {
                     }
                     if applied {
                         let tree = live.withLock { $0 }
+                        // The status bar's final figure: the whole updated
+                        // tree, not just the folders re-read.
+                        // (Ported from upstream d13954d.)
+                        metrics.reset(
+                            bytes: tree.size(of: FileTree.rootID), items: tree.nodeCount
+                        )
+                        metrics.setPhase(.scanning)
                         // An incremental update says nothing new about how
                         // long a full traversal takes: carry the last
                         // measurement forward rather than overwrite it with
@@ -344,6 +351,12 @@ final class ScanEngine: DiskScanning {
                 metrics.setPhase(.scanning)
             }
         }
+
+        // A full traversal starts its count from zero: an incremental update
+        // that gave up part-way has already counted the folders it re-read.
+        // (Ported from upstream d13954d.)
+        metrics.reset()
+        metrics.setPhase(.scanning)
 
         // Full scan/traversal is the multi-second bulk: off the cooperative pool.
         let clock = ContinuousClock()
