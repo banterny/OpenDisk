@@ -8,7 +8,7 @@ written the way they are, and the reasoning is not obvious from the code alone.
 ## Commands
 
 ```bash
-# Tests (105). Run these before and after any change.
+# Tests (115). Run these before and after any change.
 xcodebuild test -scheme OpenDisk -destination 'platform=macOS' \
   CODE_SIGNING_ALLOWED=NO -only-testing:OpenDiskTests
 
@@ -95,6 +95,14 @@ Each one is a fixed finding. Reintroducing any of them re-opens a real hole.
   redirect to a file if you want to watch progress.
 - Swift Testing suites report via `✔ Test run with N tests`; the legacy
   `Executed 0 tests` line is XCTest's counter and does not mean nothing ran.
+- The test host is the app itself. When the debug build lacks Full Disk
+  Access it shows the startup "Full Disk Access Required" alert, whose modal
+  loop blocks the main actor, so the run sits at 0% CPU after
+  `Executed 0 tests` until someone clicks **Later**. Don't tick "don't ask
+  again": that preference is shared with the installed app.
+- `xcodebuild` cannot run inside Claude Code's sandbox (it needs to write
+  DerivedData under `~/Library`); the build fails with "Operation not
+  permitted" before compiling anything.
 
 ## Syncing from upstream
 
@@ -113,7 +121,13 @@ In practice a merge is not workable: upstream stripped its comments and the
 fork kept them, so nearly every hunk conflicts. What has worked is
 `git cherry-pick -n <commit>` one commit at a time, restoring
 `OpenDisk.xcodeproj` and `OpenDisk-Info.plist` from `HEAD` after each, then
-reading every hunk. Last reviewed upstream commit: `f7551cf` (v1.2.8).
+reading every hunk. Last reviewed upstream commit: `0d296b5` (v1.4.3 plus a
+README tweak). The v1.4 window redesign was reviewed but not ported; see
+the Oct 2026 (second review) section of `SECURITY-REVIEW.md` before starting it.
+
+Use `git cherry-pick -n` (or hand-port) and write your own commit message:
+several upstream commits carry `Co-Authored-By` trailers for an AI tool,
+which must not reach this repository.
 
 After a port, update what the About box says, in `project.pbxproj` for both
 app targets: `MARKETING_VERSION` tracks the upstream release the fork has been

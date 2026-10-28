@@ -464,7 +464,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "$(OPENDISK_DEVELOPMENT_TEAM)";
 				ENABLE_HARDENED_RUNTIME = YES;
@@ -477,7 +477,7 @@
 				INFOPLIST_KEY_NSDesktopFolderUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your Desktop folder lets OpenDisk include it in your storage breakdown - for example, showing that your Desktop takes up 3 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
 				INFOPLIST_KEY_NSDocumentsFolderUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your Documents folder lets OpenDisk include it in your storage breakdown - for example, showing that your Documents folder takes up 10 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
 				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your Downloads folder lets OpenDisk include it in your storage breakdown - for example, showing that your Downloads folder takes up 8 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Security-reviewed fork of 137137137/OpenDisk. Upstream reviewed to v1.2.8 (f7551cf). No auto-updater: rebuild from source to update.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Security-reviewed fork of 137137137/OpenDisk. Upstream reviewed to v1.4.3 (0d296b5). No auto-updater: rebuild from source to update.";
 				INFOPLIST_KEY_NSNetworkVolumesUsageDescription = "OpenDisk measures how much disk space each folder uses. Access to network volumes lets OpenDisk scan drives you connect over the network - for example, showing that a NAS share holds 500 GB of backups. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your photo library lets OpenDisk include it in your storage breakdown - for example, showing that your Photos library takes up 20 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never views, uploads, or modifies your photos.";
 				INFOPLIST_KEY_NSRemovableVolumesUsageDescription = "OpenDisk measures how much disk space each folder uses. Access to removable volumes lets OpenDisk scan external drives and USB disks you plug in - for example, showing that an external drive holds 200 GB of old projects. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
@@ -485,7 +485,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.2.8;
+				MARKETING_VERSION = 1.4.3;
 				PRODUCT_BUNDLE_IDENTIFIER = ideals.OpenDisk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -506,7 +506,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEAD_CODE_STRIPPING = YES;
 				DEPLOYMENT_POSTPROCESSING = YES;
 				DEVELOPMENT_TEAM = "$(OPENDISK_DEVELOPMENT_TEAM)";
@@ -521,7 +521,7 @@
 				INFOPLIST_KEY_NSDesktopFolderUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your Desktop folder lets OpenDisk include it in your storage breakdown - for example, showing that your Desktop takes up 3 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
 				INFOPLIST_KEY_NSDocumentsFolderUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your Documents folder lets OpenDisk include it in your storage breakdown - for example, showing that your Documents folder takes up 10 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
 				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your Downloads folder lets OpenDisk include it in your storage breakdown - for example, showing that your Downloads folder takes up 8 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Security-reviewed fork of 137137137/OpenDisk. Upstream reviewed to v1.2.8 (f7551cf). No auto-updater: rebuild from source to update.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Security-reviewed fork of 137137137/OpenDisk. Upstream reviewed to v1.4.3 (0d296b5). No auto-updater: rebuild from source to update.";
 				INFOPLIST_KEY_NSNetworkVolumesUsageDescription = "OpenDisk measures how much disk space each folder uses. Access to network volumes lets OpenDisk scan drives you connect over the network - for example, showing that a NAS share holds 500 GB of backups. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your photo library lets OpenDisk include it in your storage breakdown - for example, showing that your Photos library takes up 20 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never views, uploads, or modifies your photos.";
 				INFOPLIST_KEY_NSRemovableVolumesUsageDescription = "OpenDisk measures how much disk space each folder uses. Access to removable volumes lets OpenDisk scan external drives and USB disks you plug in - for example, showing that an external drive holds 200 GB of old projects. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
@@ -530,7 +530,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LLVM_LTO = YES;
-				MARKETING_VERSION = 1.2.8;
+				MARKETING_VERSION = 1.4.3;
 				PRODUCT_BUNDLE_IDENTIFIER = ideals.OpenDisk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -620,7 +620,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEAD_CODE_STRIPPING = YES;
 				DEVELOPMENT_TEAM = "$(OPENDISK_DEVELOPMENT_TEAM)";
 				ENABLE_PREVIEWS = YES;
@@ -632,7 +632,7 @@
 				INFOPLIST_KEY_NSDesktopFolderUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your Desktop folder lets OpenDisk include it in your storage breakdown - for example, showing that your Desktop takes up 3 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
 				INFOPLIST_KEY_NSDocumentsFolderUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your Documents folder lets OpenDisk include it in your storage breakdown - for example, showing that your Documents folder takes up 10 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
 				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your Downloads folder lets OpenDisk include it in your storage breakdown - for example, showing that your Downloads folder takes up 8 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Security-reviewed fork of 137137137/OpenDisk. Upstream reviewed to v1.2.8 (f7551cf). No auto-updater: rebuild from source to update.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Security-reviewed fork of 137137137/OpenDisk. Upstream reviewed to v1.4.3 (0d296b5). No auto-updater: rebuild from source to update.";
 				INFOPLIST_KEY_NSNetworkVolumesUsageDescription = "OpenDisk measures how much disk space each folder uses. Access to network volumes lets OpenDisk scan drives you connect over the network - for example, showing that a NAS share holds 500 GB of backups. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your photo library lets OpenDisk include it in your storage breakdown - for example, showing that your Photos library takes up 20 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never views, uploads, or modifies your photos.";
 				INFOPLIST_KEY_NSRemovableVolumesUsageDescription = "OpenDisk measures how much disk space each folder uses. Access to removable volumes lets OpenDisk scan external drives and USB disks you plug in - for example, showing that an external drive holds 200 GB of old projects. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
@@ -640,7 +640,7 @@
 					"$(inherited)",
 					"@executable_path/../Frameworks",
 				);
-				MARKETING_VERSION = 1.2.8;
+				MARKETING_VERSION = 1.4.3;
 				PRODUCT_BUNDLE_IDENTIFIER = ideals.OpenDisk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;
@@ -661,7 +661,7 @@
 				"CODE_SIGN_IDENTITY[sdk=macosx*]" = "Apple Development";
 				CODE_SIGN_STYLE = Automatic;
 				COMBINE_HIDPI_IMAGES = YES;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEAD_CODE_STRIPPING = YES;
 				DEPLOYMENT_POSTPROCESSING = YES;
 				DEVELOPMENT_TEAM = "$(OPENDISK_DEVELOPMENT_TEAM)";
@@ -675,7 +675,7 @@
 				INFOPLIST_KEY_NSDesktopFolderUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your Desktop folder lets OpenDisk include it in your storage breakdown - for example, showing that your Desktop takes up 3 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
 				INFOPLIST_KEY_NSDocumentsFolderUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your Documents folder lets OpenDisk include it in your storage breakdown - for example, showing that your Documents folder takes up 10 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
 				INFOPLIST_KEY_NSDownloadsFolderUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your Downloads folder lets OpenDisk include it in your storage breakdown - for example, showing that your Downloads folder takes up 8 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
-				INFOPLIST_KEY_NSHumanReadableCopyright = "Security-reviewed fork of 137137137/OpenDisk. Upstream reviewed to v1.2.8 (f7551cf). No auto-updater: rebuild from source to update.";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "Security-reviewed fork of 137137137/OpenDisk. Upstream reviewed to v1.4.3 (0d296b5). No auto-updater: rebuild from source to update.";
 				INFOPLIST_KEY_NSNetworkVolumesUsageDescription = "OpenDisk measures how much disk space each folder uses. Access to network volumes lets OpenDisk scan drives you connect over the network - for example, showing that a NAS share holds 500 GB of backups. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "OpenDisk measures how much disk space each folder on your Mac uses. Access to your photo library lets OpenDisk include it in your storage breakdown - for example, showing that your Photos library takes up 20 GB so you can decide what to clean up. OpenDisk only reads file names and sizes; it never views, uploads, or modifies your photos.";
 				INFOPLIST_KEY_NSRemovableVolumesUsageDescription = "OpenDisk measures how much disk space each folder uses. Access to removable volumes lets OpenDisk scan external drives and USB disks you plug in - for example, showing that an external drive holds 200 GB of old projects. OpenDisk only reads file names and sizes; it never uploads or modifies your files.";
@@ -684,7 +684,7 @@
 					"@executable_path/../Frameworks",
 				);
 				LLVM_LTO = YES;
-				MARKETING_VERSION = 1.2.8;
+				MARKETING_VERSION = 1.4.3;
 				PRODUCT_BUNDLE_IDENTIFIER = ideals.OpenDisk;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				REGISTER_APP_GROUPS = YES;

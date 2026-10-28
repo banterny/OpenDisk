@@ -615,3 +615,78 @@ Not verified by hand: the drag gestures themselves. The pasteboard contents,
 operation mask and Collector state changes are covered by tests; a real mouse
 drag — row to Collector, row to Finder, item out of the Collector — is not
 something the test suite can perform.
+
+---
+
+## 🔄 Upstream ports (Oct 2026, second review)
+
+Upstream moved from `f7551cf` to `0d296b5` (v1.2.8 → v1.4.3, then a README
+badge): 41 commits plus 6 merges, all read. As before, nothing reintroduces
+what the fixes above removed — no new network code, no `Process`, no change
+to `ProtectedPaths` — but three commits would have weakened fixes the fork
+already had (see "Not ported"). Upstream still ships Sparkle; v1.4.2 and
+v1.4.3 only trim its bundle.
+
+Ported, adapted by hand or with `cherry-pick -n` — never merged:
+
+| Upstream | What | Adaptation |
+|---|---|---|
+| `9f521fe` | Collector drop target becomes an AppKit view (fixes stuck hover and pop-up after a quick drop) | renamed `InAppFileDropTarget`; H4 guard unchanged |
+| `c59457a` | Refresh rescans from the scan root | none |
+| `01f7a8e`, `5bf9e47` | Back goes up one level; Forward; mouse side buttons and swipes; sizes in the breadcrumb bar | comments kept; breadcrumbs stay buttons (the `368eef2` pre-macOS 26 workaround is not taken) |
+| `6b60c02` | Cache names gathered into one buffer before writing | none; output byte-identical |
+| `a5bd938` | Device list refreshes on volume mount, unmount and rename | none |
+| `628985d` | Chart centre follows dark mode; layout only rebuilt when its square changes | none |
+| `c1ddf4d` | Chart skips sorting children too small to draw | fork's tie-break order kept |
+
+Not ported:
+
+- `454f898` — upstream's own "Move to Trash" option. Weaker than H1 in three
+  ways: permanent delete stays the primary button (so Trash stops being the
+  default), there is no `ProtectedPaths` re-check immediately before each
+  removal, and bytes moved to the Trash are reported to the host as freed.
+- `904f180`, `72f0ecb` — in-memory compaction after incremental rescans.
+  Duplicates M2: this fork compacts on every save, and each rescan starts
+  from that compacted file, so at most one rescan's garbage is ever held.
+  Its test exercises repeated in-memory updates, which the app never does.
+- `78f5f92` — shows the stale cached tree while a full rescan runs. It loads
+  the cache with `Task.detached`, i.e. a large blocking file read on Swift's
+  cooperative thread pool, which `ScanEngine` keeps free by routing blocking
+  work through `offload`. Portable only with that changed; deferred with
+  the redesign it belongs to.
+- `3a6951d` and its follow-ups (`f8365ae`, `e1a40b4`, `dc6e1c8`, `d13954d`,
+  `ba6672d`, `fb76404`, `ab868c6`, `3a09ac2`, `d7faff5`, `90c12c6`,
+  `59d87ab`, `d2958b7`, `71d09de`, `4574ad8`) — the v1.4 window redesign
+  (sidebar, Finder-style list, text size). Reviewed and clean on security:
+  no new deletion or drag path, drags still leave through `FileDragSource`
+  (copy-only, invariant 6), `ProtectedPaths` is only read, and the one new
+  action is Reveal in Finder. Deferred as a product decision: every commit
+  conflicts, `ab868c6` changes an existing test's expected value
+  (`"1:05"` → `"1 min 5 sec"`), `d7faff5` starts a whole-disk scan at every
+  launch, and `fb76404` re-reads the device list every 3 seconds.
+- `868ff2c`, `815fef1`, `13501d4`, `98bce73`, `368eef2`, `0d296b5` — macOS
+  14/15 and Xcode 16 support. The fork is pinned to macOS 26; `868ff2c` also
+  swaps `Synchronization` for a hand-rolled lock and edits two existing tests.
+- `9c95eeb`, `9a90f25` — Sparkle bundle trimming (C1: no Sparkle here).
+- `a3c71df` — a README star-history chart loaded from a third-party site.
+- `e421ee4`, `6e1769d`, `709dd07`, `387e00c`, `80e4974` — version bumps.
+
+Security-relevant consequences of what *was* ported:
+
+- **H4 holds unchanged.** The drop target refuses any drag unless
+  `FileDragSource.shared.activeFiles` is set and takes the files from there;
+  `registerForDraggedTypes` only decides which drags are offered to the view
+  and reads no data. The view returns nil from `hitTest`, so it never
+  intercepts clicks or hovers.
+- **The navigation gestures are local.** `NSEvent.addLocalMonitorForEvents`
+  sees only events already addressed to this app, and the handler ignores
+  any window but the scan window. No permission is requested. ⌘[ moved
+  from Unmount (now ⌘E) to Back.
+- **Nothing ported touches deletion, `ProtectedPaths` or the drag operation
+  mask.** No `project.pbxproj` hunk was taken from upstream; the version
+  bump was written by hand.
+
+Not verified by hand: the gestures and the hover fix themselves (mouse side
+buttons, swipes, a quick drop followed by a return to the list), and the
+chart in dark mode. The test suite (115 tests, 10 new for navigation) covers
+the navigation model and every pre-existing behaviour, not live input.
