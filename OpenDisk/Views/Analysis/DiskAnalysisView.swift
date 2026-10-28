@@ -734,16 +734,14 @@ struct DiskAnalysisView: View {
         // Collector tell a drop back onto itself (keep) from a drop elsewhere
         // in this pane (remove) when one of its own items is dragged out.
         .coordinateSpace(.collectorDrop)
-        // `.fileURL` is listed only so drags of real files are offered here
-        // at all — `InAppFileDropDelegate` then refuses anything that did not
-        // start inside this app, and never reads the pasteboard. (H4)
-        .onDrop(
-            of: [.fileURL, .openDiskCollectedFiles],
-            delegate: InAppFileDropDelegate(
+        // `InAppFileDropTarget` refuses anything that did not start inside
+        // this app, and never reads the pasteboard. (H4)
+        .overlay {
+            InAppFileDropTarget(
                 onTargetChange: { isCollectorTargeted = $0 },
                 perform: handleCollectorDrop
             )
-        )
+        }
     }
 
     /// Free space to draw on the chart, or nil for no wedge. Only at the
@@ -758,7 +756,7 @@ struct DiskAnalysisView: View {
     }
 
     /// Handles a drop on the chart pane. `files` comes from the in-process
-    /// drag source, never from the pasteboard (see `InAppFileDropDelegate`).
+    /// drag source, never from the pasteboard (see `InAppFileDropTarget`).
     /// (Ported from upstream e9a1158/43e4967.)
     private func handleCollectorDrop(_ files: [CollectedFile], at location: CGPoint) -> Bool {
         // One of the Collector's own items coming back: this is a "take it

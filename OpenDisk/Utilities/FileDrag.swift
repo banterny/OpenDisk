@@ -59,7 +59,7 @@ final class FileDragItem: NSObject, NSPasteboardWriting {
     func pasteboardPropertyList(forType type: NSPasteboard.PasteboardType) -> Any? {
         // The encoded form exists so the item has *some* content under the
         // private type; nothing in this app decodes it back (see
-        // `InAppFileDropDelegate`).
+        // `InAppFileDropTarget`).
         guard let fileURL else { return try? JSONEncoder().encode(file) }
         return fileURL.pasteboardPropertyList(forType: type)
     }
@@ -265,31 +265,65 @@ extension View {
 /// payload arrived and relied on a private type to keep foreign payloads out;
 /// a type identifier is only a string, and any app can put any string on a
 /// pasteboard. Here a file dragged in from Finder, or a payload crafted by
-/// another app, fails `validateDrop` whatever types it advertises, because
-/// no other process can set this app's in-memory state.
-struct InAppFileDropDelegate: DropDelegate {
+/// another app, is refused in `draggingEntered` whatever types it advertises,
+/// because no other process can set this app's in-memory state.
+///
+/// A plain AppKit view rather than SwiftUI's `.onDrop`: that destination
+/// keeps the drag session alive for about 300 ms after the drop, swallowing
+/// mouse moves, and AppKit then evaluates tracking areas at the drop point
+/// instead of the cursor. Moving straight back to the list left its rows
+/// without hover highlights and re-opened the Collector pop-up until the
+/// cursor crossed a pane boundary. This view ends the session at once.
+/// (Ported from upstream 9f521fe.)
+struct InAppFileDropTarget: NSViewRepresentable {
     let onTargetChange: (Bool) -> Void
     let perform: ([CollectedFile], CGPoint) -> Bool
 
-    func validateDrop(info: DropInfo) -> Bool {
-        FileDragSource.shared.activeFiles != nil
+    func makeNSView(context: Context) -> InAppFileDropView {
+        let view = InAppFileDropView()
+        // Registering a type only decides which drags are *offered* here;
+        // nothing reads data of these types. `.fileURL` is listed so drags
+        // of real files reach the view at all, and are then refused unless
+        // they began in this app.
+        view.registerForDraggedTypes([.fileURL, .openDiskCollectedFiles])
+        return view
     }
 
-    func dropEntered(info: DropInfo) {
+    func updateNSView(_ view: InAppFileDropView, context: Context) {
+        view.onTargetChange = onTargetChange
+        view.perform = perform
+    }
+}
+
+final class InAppFileDropView: NSView {
+    var onTargetChange: (Bool) -> Void = { _ in }
+    var perform: ([CollectedFile], CGPoint) -> Bool = { _, _ in false }
+
+    // Flipped, so a drop location reads top-down like the SwiftUI
+    // `.collectorDrop` coordinate space it overlays.
+    override var isFlipped: Bool { true }
+
+    // Invisible to clicks and hovers: the view exists only for drags, and
+    // must not block the chart and Collector beneath it.
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func draggingEntered(_ sender: NSDraggingInfo) -> NSDragOperation {
+        guard FileDragSource.shared.activeFiles != nil else { return [] }
         onTargetChange(true)
+        return .copy
     }
 
-    func dropExited(info: DropInfo) {
+    override func draggingUpdated(_ sender: NSDraggingInfo) -> NSDragOperation {
+        FileDragSource.shared.activeFiles != nil ? .copy : []
+    }
+
+    override func draggingExited(_ sender: NSDraggingInfo?) {
         onTargetChange(false)
     }
 
-    func dropUpdated(info: DropInfo) -> DropProposal? {
-        DropProposal(operation: .copy)
-    }
-
-    func performDrop(info: DropInfo) -> Bool {
+    override func performDragOperation(_ sender: NSDraggingInfo) -> Bool {
         onTargetChange(false)
         guard let files = FileDragSource.shared.activeFiles else { return false }
-        return perform(files, info.location)
+        return perform(files, convert(sender.draggingLocation, from: nil))
     }
 }

@@ -50,8 +50,9 @@ Each one is a fixed finding. Reintroducing any of them re-opens a real hole.
    Note `deleteAll(using:)`'s *parameter* default is `.permanent` so the
    pre-existing tests stay hermetic; `CollectorBar` passes the mode explicitly. (H1)
 5. **The Collector's drop target never reads the pasteboard.** Dropped files
-   become deletion candidates, so `InAppFileDropDelegate` accepts a drop only
-   while `FileDragSource.shared.activeFiles` is set — a drag begun in this
+   become deletion candidates, so `InAppFileDropTarget` (an AppKit view in
+   `FileDrag.swift`) accepts a drop only while
+   `FileDragSource.shared.activeFiles` is set — a drag begun in this
    process — and takes the files from there. Do not reintroduce
    `.dropDestination(for:)` or any decoding of a dragged payload. The private
    type `ideals.OpenDisk.collected-files` (never `public.json`) remains as

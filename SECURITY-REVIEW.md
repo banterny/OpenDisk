@@ -271,7 +271,9 @@ unaffected.
 only ever kept *accidental* payloads out: a type identifier is a string, and a
 hostile app can write any string to the drag pasteboard. With the drag rewrite
 ported from upstream (`e9a1158`, `43e4967`) the drop target no longer decodes
-a payload at all. `InAppFileDropDelegate` accepts a drop only while
+a payload at all. `InAppFileDropTarget` (`InAppFileDropDelegate` until the
+port of upstream `9f521fe`, which made it an AppKit view to fix stuck hover
+state; the guard is unchanged) accepts a drop only while
 `FileDragSource.shared.activeFiles` is set — in-process state that exists only
 during a drag begun in this app — and takes the files from there. A foreign
 drag fails validation whatever types it advertises. The private type survives
