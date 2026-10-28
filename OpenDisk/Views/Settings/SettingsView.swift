@@ -6,6 +6,7 @@ struct SettingsView: View {
     @AppStorage("fda_show_prompt_at_startup") private var showPromptAtStartup = true
     @AppStorage(FreeSpaceInfo.defaultsKey) private var showFreeSpace = true
     @AppStorage("delete_permanently") private var deletePermanently = false
+    @AppStorage(LaunchLocation.defaultsKey) private var scanAtLaunch = LaunchLocation.defaultValue
     @State private var keyBindings = KeyBindingStore.shared
 
     var body: some View {
@@ -24,6 +25,22 @@ struct SettingsView: View {
                 }
             } header: {
                 Label("Deletion", systemImage: "trash")
+            }
+
+            // Off by default; see `LaunchLocation`. (Ported from upstream
+            // d7faff5, which always does this.)
+            Section {
+                Toggle(isOn: $scanAtLaunch) {
+                    VStack(alignment: .leading) {
+                        Text("Scan a disk when OpenDisk opens")
+
+                        Text("Opens the last disk or folder you scanned on this Mac (never an external drive), or else the startup disk, and scans it straight away. Takes effect the next time OpenDisk opens.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Label("Launch", systemImage: "power")
             }
 
             Section {

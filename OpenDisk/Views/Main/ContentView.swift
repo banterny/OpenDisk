@@ -29,6 +29,13 @@ struct ContentView: View {
     @State private var active: DeviceInfo?
     @State private var isChoosingFolder = false
     @State private var columnVisibility = NavigationSplitViewVisibility.all
+    /// Launch-time selection runs at most once per window, and reads the
+    /// setting once, as the window opens: switching it on later waits for
+    /// the next launch, as its label says, rather than firing on the next
+    /// disk mount.
+    @State private var scansAtLaunch = LaunchLocation.isEnabled()
+    @State private var didSelectInitialLocation = false
+    @AppStorage(LaunchLocation.lastLocationKey) private var lastLocation = ""
 
     var body: some View {
         NavigationSplitView(columnVisibility: $columnVisibility) {
@@ -77,14 +84,23 @@ struct ContentView: View {
         .onChange(of: selection) { _, path in
             Task { @MainActor in open(path) }
         }
+        // Only remembered while "Scan a disk when OpenDisk opens" is on;
+        // with it off, nothing about what was opened is stored.
+        .onChange(of: active?.path) { _, path in
+            if let path, LaunchLocation.isEnabled() { lastLocation = path }
+        }
+        // The device list arrives a moment after launch.
+        .onChange(of: deviceMonitor.devices, initial: true) {
+            selectInitialLocation()
+        }
         // Reachable by the sidebar (grants, padlocks) and the analysis view
         // (security-scoped access held for the length of a scan).
         .environment(scanAccess)
     }
 
-    /// Shown until a location is picked. Launch selects nothing, so this is
-    /// the first thing a user sees; it says what to do and offers the folder
-    /// chooser. (3a6951d's version; upstream later cut it to a bare "No
+    /// Shown until a location is picked. By default launch selects nothing,
+    /// so this is the first thing a user sees; it says what to do and offers
+    /// the folder chooser. (3a6951d's version; upstream later cut it to a bare "No
     /// Location Selected" once launch auto-selected a disk, which the fork
     /// does only on request — see Settings.)
     private var placeholder: some View {
@@ -101,6 +117,26 @@ struct ContentView: View {
             Button(ScanAccess.isSandboxed ? "Choose a Folder…" : "Scan Folder…", action: addFolder)
         }
         .navigationTitle("OpenDisk")
+    }
+
+    /// With the setting on, opens (and so scans) a location at launch —
+    /// see `LaunchLocation`. With it off, returns without touching the
+    /// selection: the window waits for the user, as before the redesign.
+    /// (Ported from upstream d7faff5 as an opt-in.)
+    private func selectInitialLocation() {
+        guard scansAtLaunch else { return }
+        // The test host is this app and shares its preferences: with the
+        // setting on in the installed app, every test run would otherwise
+        // start a whole-disk scan. (Same guard as the startup Full Disk
+        // Access alert.)
+        guard !FullDiskAccess.isHostingTests() else { return }
+        guard selection == nil, !didSelectInitialLocation, !deviceMonitor.devices.isEmpty else { return }
+        didSelectInitialLocation = true
+        selection = LaunchLocation.choose(
+            from: deviceMonitor.devices + folderLocations,
+            last: lastLocation,
+            canOpen: { !ScanAccess.isSandboxed || scanAccess.isGranted($0.path) }
+        )
     }
 
     private var savedFolderPaths: [String] {
