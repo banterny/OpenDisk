@@ -19,10 +19,15 @@ struct SearchResultsView: View {
     /// collector payloads for group drags.
     var selectedPaths: Set<String> = []
     var focusedPath: String? = nil
+    var showsDetailColumns: Bool = true
+    var kindWidth: CGFloat? = nil
     var selectionFiles: [CollectedFile] = []
     /// Passed through to each row's "Quick Look" context-menu item.
     /// (Ported from upstream 999fae2.)
     var onQuickLook: ((FolderItem) -> Void)? = nil
+    /// One click selects; a double click opens the hit in the list (a
+    /// folder, or a file's folder). (Ported from upstream 3a6951d.)
+    let onSelect: (FolderItem) -> Void
     let onOpen: (FolderItem) -> Void
 
     var body: some View {
@@ -42,16 +47,19 @@ struct SearchResultsView: View {
                 ScrollViewReader { proxy in
                     ScrollView {
                         LazyVStack(spacing: 0) {
-                            ForEach(items) { item in
+                            ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                                 FolderRowView(
                                     item: item,
+                                    index: index,
                                     locationDetail: location(of: item),
                                     isSelected: selectedPaths.contains(item.path),
+                                    showsDetailColumns: showsDetailColumns,
+                                    kindWidth: kindWidth,
                                     selectionFiles: selectionFiles,
-                                    onQuickLook: onQuickLook
-                                ) {
-                                    onOpen(item)
-                                }
+                                    onQuickLook: onQuickLook,
+                                    onSelect: { onSelect(item) },
+                                    onOpen: { onOpen(item) }
+                                )
                                 .id(item.path)
                             }
                         }

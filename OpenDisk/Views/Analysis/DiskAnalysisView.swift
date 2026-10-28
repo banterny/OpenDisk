@@ -70,6 +70,11 @@ struct DiskAnalysisView: View {
     /// only then is the volume's free space part of the picture.
     /// (Ported from upstream 3a6951d.)
     @State private var isVolumeRoot = false
+    /// The list's text size, shared with the View menu's commands.
+    /// (Ported from upstream 3a6951d.)
+    @AppStorage(ListScale.defaultsKey) private var listScaleLevel = ListScale.defaultLevel
+    /// Whether the list is wide enough for the Kind column.
+    @State private var listIsWide = true
 
     init(
         rootPath: String,
@@ -98,6 +103,9 @@ struct DiskAnalysisView: View {
                 // The split starts at 60% list / 40% chart (ideal widths
                 // seed HSplitView's initial divider position); the divider
                 // stays user-draggable.
+                // Read here, not inside the geometry closure, which runs off
+                // the main actor. (Upstream dc6e1c8.)
+                let detailMinWidth = listScale.scaled(FileColumns.detailMinWidth)
                 GeometryReader { geometry in
                     HSplitView {
                         listPane
@@ -106,6 +114,9 @@ struct DiskAnalysisView: View {
                                 idealWidth: geometry.size.width * 0.6,
                                 maxWidth: .infinity, maxHeight: .infinity
                             )
+                            .onGeometryChange(for: Bool.self) {
+                                $0.size.width >= detailMinWidth
+                            } action: { listIsWide = $0 }
 
                         chartPane
                             .frame(
@@ -285,6 +296,14 @@ struct DiskAnalysisView: View {
                 .disabled(!collector.canUndo || searchPresented)
                 .opacity(0)
                 .accessibilityHidden(true)
+            // ⌘= as well as the menu's ⌘+, since + needs Shift on most
+            // layouts. (Ported from upstream 3a6951d.)
+            Button("Make Text Bigger") {
+                listScaleLevel = ListScale(level: listScaleLevel + 1).level
+            }
+                .keyboardShortcut("=", modifiers: .command)
+                .opacity(0)
+                .accessibilityHidden(true)
             // ⌘↑ keeps working as "up one level" now that the Enclosing
             // Folder toolbar button has folded into Back.
             Button("Enclosing Folder", action: goBack)
@@ -332,12 +351,14 @@ struct DiskAnalysisView: View {
     private enum SortField { case name, size }
 
     /// Applies the current column sort. "Purgeable Space" sorts by size like
-    /// any other row (no longer pinned to the top).
+    /// any other row (no longer pinned to the top). Names compare as Finder
+    /// does, numbers by value ("file2" before "file10"). (Ported from
+    /// upstream 3a6951d.)
     private func sortedForDisplay(_ items: [FolderItem]) -> [FolderItem] {
         switch sort {
         case .name:
             return items.sorted {
-                let result = $0.name.localizedCaseInsensitiveCompare($1.name)
+                let result = $0.name.localizedStandardCompare($1.name)
                 return sortAscending ? result == .orderedAscending : result == .orderedDescending
             }
         case .size:
@@ -357,6 +378,7 @@ struct DiskAnalysisView: View {
         // and the selection payload share it instead of re-filtering and
         // re-sorting per use.
         let items = visibleItems
+        let kindWidth = FileColumns.kindWidth(for: items, scale: listScale)
         Group {
             if isSearchActive {
                 SearchResultsView(
@@ -368,25 +390,35 @@ struct DiskAnalysisView: View {
                     query: searchText,
                     selectedPaths: selectedPaths,
                     focusedPath: selectionAnchor,
+                    showsDetailColumns: showsDetailColumns,
+                    kindWidth: kindWidth,
                     selectionFiles: selectionFiles(in: items),
                     onQuickLook: quickLook,
-                    onOpen: handleRowTap
+                    onSelect: selectRow,
+                    onOpen: openRow
                 )
             } else {
-                VStack(spacing: 0) {
-                    columnHeader
-                    ScanResultsView(
-                        items: items,
-                        displayVersion: analyzer.displayVersion,
-                        selectedPaths: selectedPaths,
-                        focusedPath: selectionAnchor,
-                        selectionFiles: selectionFiles(in: items),
-                        onQuickLook: quickLook,
-                        onFolderTap: handleRowTap
-                    )
+                ScanResultsView(
+                    items: items,
+                    displayVersion: analyzer.displayVersion,
+                    selectedPaths: selectedPaths,
+                    focusedPath: selectionAnchor,
+                    showsDetailColumns: showsDetailColumns,
+                    kindWidth: kindWidth,
+                    selectionFiles: selectionFiles(in: items),
+                    onQuickLook: quickLook,
+                    onSelect: selectRow,
+                    onOpen: openRow
+                ) {
+                    columnHeader(kindWidth: kindWidth)
                 }
+                // A fresh list per folder, so it opens scrolled to the
+                // focused row rather than wherever the last folder was.
+                // (Ported from upstream 59d87ab.)
+                .id(currentPath)
             }
         }
+        .environment(\.listScale, listScale)
         // Quick Look panel (spacebar by default, see handleKey). Passing the
         // visible rows lets the panel's arrow keys walk the list in display
         // order, like Finder. Synthetic rows have no on-disk file to show.
@@ -619,23 +651,33 @@ struct DiskAnalysisView: View {
 
     // MARK: - Sortable column header
 
-    @ViewBuilder
-    private var columnHeader: some View {
-        HStack(spacing: 0) {
+    private var listScale: ListScale { ListScale(level: listScaleLevel) }
+
+    private var showsDetailColumns: Bool { listIsWide }
+
+    /// Column titles laid out on the rows' own grid (`FileColumns`), so
+    /// they line up at every text size. The size bar's column has no
+    /// title, as in Finder. (Ported from upstream 3a6951d and 4574ad8.)
+    private func columnHeader(kindWidth: CGFloat) -> some View {
+        HStack(spacing: FileColumns.spacing) {
+            Color.clear
+                .frame(width: listScale.icon, height: 1)
             sortHeaderButton(.name, "Name")
-            Spacer(minLength: 8)
+                .frame(maxWidth: .infinity, alignment: .leading)
             sortHeaderButton(.size, "Size")
+                .frame(width: listScale.scaled(FileColumns.size), alignment: .trailing)
+            Color.clear
+                .frame(width: listScale.scaled(FileColumns.bar), height: 1)
+            if showsDetailColumns {
+                Text("Kind")
+                    .frame(width: kindWidth, alignment: .leading)
+            }
         }
-        .font(.caption)
-        .fontWeight(.semibold)
+        .font(.system(size: listScale.headerFontSize, weight: .medium))
         .foregroundStyle(.secondary)
-        // Align the labels with the row columns: past the icon on the left,
-        // before the disclosure chevron on the right.
-        .padding(.leading, 40)
-        .padding(.trailing, 20)
+        .lineLimit(1)
+        .padding(.horizontal, FileColumns.inset * 2)
         .padding(.vertical, 5)
-        .background(.bar)
-        Divider()
     }
 
     private func sortHeaderButton(_ field: SortField, _ label: String) -> some View {
@@ -661,11 +703,13 @@ struct DiskAnalysisView: View {
     // MARK: - Selection
 
     /// Routes a row click by its keyboard modifiers: shift extends a range
-    /// from the anchor, ⌘ toggles membership, and a plain click clears the
-    /// selection and behaves as before (navigate / open). The synthetic
-    /// "Purgeable Space" row never joins a multi-selection — it has no
-    /// real path, and drops already expand it separately.
-    private func handleRowTap(_ item: FolderItem) {
+    /// from the anchor, ⌘ toggles membership, and a plain click selects the
+    /// row alone. Opening is a double click (`openRow`), as in Finder;
+    /// before the redesign a plain click on a folder opened it. The
+    /// synthetic "Purgeable Space" row never joins a multi-selection — it
+    /// has no real path, and drops already expand it separately — but it
+    /// still takes the focus. (Ported from upstream 3a6951d.)
+    private func selectRow(_ item: FolderItem) {
         let modifiers = NSApp.currentEvent?.modifierFlags ?? []
         let selectable = !item.path.hasPrefix("::")
 
@@ -694,17 +738,23 @@ struct DiskAnalysisView: View {
             return
         }
 
-        selectedPaths.removeAll()
+        selectedPaths = selectable ? [item.path] : []
+        selectionAnchor = item.path
+    }
+
+    /// A double click (or the row menu's first item, or VoiceOver's
+    /// default action): a search hit opens in the list, a folder opens, a
+    /// file opens in Quick Look.
+    private func openRow(_ item: FolderItem) {
         selectionAnchor = item.path
         if isSearchActive {
+            selectedPaths.removeAll()
             openSearchResult(item)
         } else if item.isDirectory {
+            selectedPaths.removeAll()
             navigateToFolder(item)
-        } else if selectable {
-            // A plain click on a file selects it (Finder's rule) — it has
-            // nowhere to navigate to, and the highlight marks what spacebar
-            // will Quick Look. (Ported from upstream 8854e7d.)
-            selectedPaths = [item.path]
+        } else {
+            quickLook(item)
         }
     }
 

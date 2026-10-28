@@ -23,6 +23,7 @@ struct OpenDiskApp: App {
         .windowResizability(.contentMinSize)
         .commands {
             ToolbarCommands()
+            TextSizeCommands()
         }
 
         Settings {
@@ -48,6 +49,29 @@ struct OpenDiskApp: App {
                 title: "Full Disk Access Required",
                 message: "OpenDisk needs Full Disk Access to analyze all files and folders on your system. You can grant this permission in System Settings > Privacy & Security > Full Disk Access."
             )
+        }
+    }
+}
+
+/// View ▸ Make Text Bigger / Make Text Smaller / Actual Size for the file
+/// list, as in Finder. The level is clamped by `ListScale`, so a stale or
+/// hand-edited preference can only pick a size from the list.
+/// (Ported from upstream 3a6951d.)
+private struct TextSizeCommands: Commands {
+    @AppStorage(ListScale.defaultsKey) private var level = ListScale.defaultLevel
+
+    var body: some Commands {
+        CommandGroup(after: .toolbar) {
+            Divider()
+            Button("Make Text Bigger") { level = ListScale(level: level + 1).level }
+                .keyboardShortcut("+", modifiers: .command)
+                .disabled(level >= ListScale.fontSizes.count - 1)
+            Button("Make Text Smaller") { level = ListScale(level: level - 1).level }
+                .keyboardShortcut("-", modifiers: .command)
+                .disabled(level <= 0)
+            Button("Actual Size") { level = ListScale.defaultLevel }
+                .keyboardShortcut("0", modifiers: .command)
+                .disabled(level == ListScale.defaultLevel)
         }
     }
 }
