@@ -180,7 +180,9 @@ struct InAppFileDropTests {
 
     @Test("with no in-app drag in flight there is nothing for a drop to act on")
     func noActiveFilesOutsideADrag() {
-        // `validateDrop` is exactly `activeFiles != nil`, and `begin` refuses
+        // `InAppFileDropView` accepts a drag only while `activeFiles != nil`
+        // (in `draggingEntered`, `draggingUpdated` and
+        // `performDragOperation`), and `begin` refuses
         // to start without a live mouse event — so outside a real drag this
         // must be nil, and a foreign drop (Finder, another app) is refused.
         #expect(FileDragSource.shared.activeFiles == nil)
