@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Chart coloring following GNOME baobab's scheme: six palette hues
@@ -30,6 +31,21 @@ enum ChartPalette {
     static let levelHighlighted = RGB(red: 0xE0 / 255.0, green: 0xE2 / 255.0, blue: 0xDD / 255.0)
     static let freeSpace = RGB(red: 0x5A / 255.0, green: 0x5E / 255.0, blue: 0x62 / 255.0)
     static let freeSpaceHighlighted = RGB(red: 0x7A / 255.0, green: 0x7E / 255.0, blue: 0x82 / 255.0)
+
+    /// Fill for the center disk. baobab's light gray in light mode; in dark
+    /// mode a dark gray, so the disk stops glowing against a dark window
+    /// and the center label (drawn in the primary text color) stays
+    /// readable. A dynamic color, resolved per appearance at draw time.
+    /// (Ported from upstream 628985d.)
+    static func centerColor(highlighted: Bool) -> Color {
+        Color(nsColor: NSColor(name: nil) { appearance in
+            let dark = appearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let rgb = highlighted ? levelHighlighted : level
+            return dark
+                ? NSColor(white: highlighted ? 0.34 : 0.27, alpha: 1)
+                : NSColor(red: rgb.red, green: rgb.green, blue: rgb.blue, alpha: 1)
+        })
+    }
 
     /// Positions span 0..200, two palette steps per 100 — a full trip
     /// around the six hues over the chart's extent.
