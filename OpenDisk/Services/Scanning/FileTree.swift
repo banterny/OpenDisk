@@ -239,6 +239,15 @@ struct FileTree: Sendable {
     /// descending, name ascending on ties so successive live snapshots
     /// never shuffle equal-sized rows. The list and the chart both use
     /// this, keeping their orders identical by construction.
+    ///
+    /// Ties compare names as Finder does (`localizedStandardCompare`:
+    /// case-insensitive, "file2" before "file10") rather than by raw code
+    /// point, which put every capitalised name ahead of every lower-case
+    /// one. (Ported from upstream ab868c6.) That comparison is
+    /// locale-dependent; should it ever report two different names as
+    /// equal (both can sit in one folder on a case-sensitive volume), the
+    /// raw comparison breaks the tie, so the order stays total and the
+    /// no-shuffle property holds. (The fallback is the fork's.)
     func childrenSortedForDisplay(of id: NodeID) -> [NodeID] {
         sortedForDisplay(children(of: id))
     }
@@ -246,7 +255,13 @@ struct FileTree: Sendable {
     func sortedForDisplay(_ ids: [NodeID]) -> [NodeID] {
         ids.sorted {
             let (a, b) = (size(of: $0), size(of: $1))
-            return a == b ? name(of: $0) < name(of: $1) : a > b
+            guard a == b else { return a > b }
+            let (nameA, nameB) = (name(of: $0), name(of: $1))
+            switch nameA.localizedStandardCompare(nameB) {
+            case .orderedAscending: return true
+            case .orderedDescending: return false
+            case .orderedSame: return nameA < nameB
+            }
         }
     }
 

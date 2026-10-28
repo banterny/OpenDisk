@@ -160,6 +160,20 @@ struct FileTreeTests {
         tree.rollUpDirectorySizes()
         #expect(tree.size(of: FileTree.rootID) == 10)
     }
+
+    @Test("equal-sized siblings sort as Finder names them, deterministically")
+    func displayOrderTieBreak() {
+        var tree = FileTree(rootName: "/Volumes/T")
+        for name in ["file10", "Zebra", "file2", "apple", "file", "File"] {
+            tree.addNode(name: name, parent: FileTree.rootID, size: 100, isDirectory: false)
+        }
+        tree.addNode(name: "big", parent: FileTree.rootID, size: 900, isDirectory: false)
+
+        let names = tree.childrenSortedForDisplay(of: FileTree.rootID).map { tree.name(of: $0) }
+        // Size first; then case-insensitive, numeric-aware names, with
+        // "file" and "File" still in a fixed order.
+        #expect(names == ["big", "apple", "file", "File", "file2", "file10", "Zebra"])
+    }
 }
 
 @Suite("FileTree hardening")
