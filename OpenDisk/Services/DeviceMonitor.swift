@@ -1,4 +1,4 @@
-import Foundation
+import AppKit
 import Observation
 
 /// Enumerates the devices offered in the sidebar: the boot volume group
@@ -8,9 +8,33 @@ import Observation
 final class DeviceMonitor {
 
     private(set) var devices: [DeviceInfo] = []
+    @ObservationIgnored private var volumeObservers: [NSObjectProtocol] = []
 
     init() {
         Task { await refresh() }
+        observeVolumeChanges()
+    }
+
+    /// Re-reads the list whenever a volume is mounted, unmounted or
+    /// renamed, so a drive plugged in after launch appears without a
+    /// restart. These are ordinary in-process notifications from
+    /// NSWorkspace; they need no permission and observe nothing beyond
+    /// volume events. (Ported from upstream a5bd938.)
+    private func observeVolumeChanges() {
+        let center = NSWorkspace.shared.notificationCenter
+        let names = [
+            NSWorkspace.didMountNotification,
+            NSWorkspace.didUnmountNotification,
+            NSWorkspace.didRenameVolumeNotification,
+        ]
+        volumeObservers = names.map { name in
+            center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self else { return }
+                    Task { await self.refresh() }
+                }
+            }
+        }
     }
 
     /// Rebuilds the device list from the currently mounted volumes.
