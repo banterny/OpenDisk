@@ -19,8 +19,10 @@ final class DiskAnalyzer {
     /// display; navigation into any of them is still exact.
     private static let maxVisibleChildren = 100
     /// Entries at or below this size are noise for a disk-usage view.
-    /// Applied only to final results — during a live scan a directory's
-    /// size starts at zero and grows, so nothing is hidden yet.
+    /// During a live scan a folder's size starts at zero and grows, so
+    /// partial results still show small *folders* — except hidden ones,
+    /// which are almost always system housekeeping that stays empty.
+    /// (Partial-result rule ported from upstream e1a40b4.)
     private static let minVisibleSize: Int64 = 1_024
 
     // MARK: - Observable UI state
@@ -31,6 +33,10 @@ final class DiskAnalyzer {
     /// Nil until the first snapshot arrives (charts show a placeholder
     /// during the skeleton phase — a shallow listing has no hierarchy).
     private(set) var chartRoot: ChartItem?
+    /// The chart build in flight, if any; superseded builds are cancelled
+    /// so a slow one can never land after a newer one. (Ported from
+    /// upstream 59d87ab.)
+    @ObservationIgnored private var chartBuildTask: Task<Void, Never>?
     private(set) var isScanning = false
     /// Directories the finished scan could not open (permissions, a
     /// revoked sandbox grant, a volume ejected mid-scan). Nonzero with an
@@ -137,6 +143,12 @@ final class DiskAnalyzer {
             return
         }
 
+        // Rescanning the location already on screen (Refresh, the rescan
+        // after a Collector delete) keeps the old rows and chart up until
+        // new data replaces them, rather than blanking the window. The
+        // skeleton read below stands aside because `scanResult` stays set.
+        // (Ported from upstream e1a40b4.)
+        let keepsCurrentResult = path == scanRootPath && scanResult != nil && !needsFullDiskAccess
         needsFullDiskAccess = false
         isScanning = true
         totalDiskScannedBytes = 0
@@ -147,14 +159,20 @@ final class DiskAnalyzer {
         scanDuration = 0
         scanRootPath = path
         currentPath = path
-        scanResult = nil
         resultIsPartial = false
         lastAppliedPartialSequence = 0
-        rootItems = []
-        chartRoot = nil
         unreadableDirectories = 0
-        displayedTotalBytes = 0
-        displayVersion += 1
+        if keepsCurrentResult {
+            // `currentPath` just moved back to the root; show the old tree
+            // from there.
+            refreshDisplayedItems()
+        } else {
+            scanResult = nil
+            rootItems = []
+            setChartRoot(nil)
+            displayedTotalBytes = 0
+            displayVersion += 1
+        }
         // The old tree's index is stale the moment a rescan starts. An
         // active query stays active and resolves against the new tree
         // (mid-scan on demand, and again when the scan finishes).
@@ -274,7 +292,7 @@ final class DiskAnalyzer {
         rootItems = items
         displayedTotalBytes = items.reduce(0) { $0 + $1.size }
         displayVersion += 1
-        chartRoot = cleanableChartRoot(items: items, total: displayedTotalBytes)
+        setChartRoot(cleanableChartRoot(items: items, total: displayedTotalBytes))
     }
 
     /// One-ring chart of the cleanable view: cache slices are real
@@ -422,7 +440,7 @@ final class DiskAnalyzer {
 
     private func rebuildChartRoot(for node: FileTree.NodeID) {
         guard let tree = scanResult?.tree, tree.isDirectory(node) else {
-            chartRoot = nil
+            setChartRoot(nil)
             return
         }
         // The center ring shows the volume/folder's display name — its last
@@ -432,9 +450,34 @@ final class DiskAnalyzer {
         // The chart shows the true hierarchy; the "Purgeable Space" cleanup
         // lens is a list-only shortcut (its bytes already appear under their
         // real parents in the chart), so no synthetic slice is added.
-        chartRoot = ChartItem.build(
-            from: tree, at: node, name: name, path: currentPath
-        )
+        //
+        // Built off the main actor: on a large folder the depth-limited
+        // walk is long enough to stall the list. It is pure computation on
+        // an immutable tree copy — no file I/O — so a detached task (the
+        // cooperative pool) is the right home for it, unlike the blocking
+        // scan steps `ScanEngine` keeps on its own queue. The previous
+        // chart stays up until the new one lands. (Ported from upstream
+        // 59d87ab.)
+        let path = currentPath
+        chartBuildTask?.cancel()
+        chartBuildTask = Task { [weak self] in
+            let item = await Task.detached(priority: .userInitiated) {
+                ChartItem.build(from: tree, at: node, name: name, path: path)
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            self.chartRoot = item
+        }
+    }
+
+    /// Sets the chart outright, discarding any build still in flight — and
+    /// any rebuild still waiting its turn, which would otherwise draw the
+    /// folder left behind over the view just entered. (Clearing the
+    /// pending rebuild is the fork's addition.)
+    private func setChartRoot(_ item: ChartItem?) {
+        chartBuildTask?.cancel()
+        chartBuildTask = nil
+        pendingChartNode = nil
+        chartRoot = item
     }
 
     // MARK: - Search
@@ -524,14 +567,17 @@ final class DiskAnalyzer {
 
     private func folderItems(for node: FileTree.NodeID, limit: Int?) -> [FolderItem] {
         guard let tree = scanResult?.tree, tree.isDirectory(node) else { return [] }
-        // Live results keep zero-size entries (their sizes are still
-        // arriving); finished results hide sub-1KB noise.
-        let minVisibleSize = resultIsPartial ? Int64(-1) : Self.minVisibleSize
+        // Finished results hide sub-1KB noise; live results also keep
+        // small visible folders, whose sizes are still arriving.
+        let isPartial = resultIsPartial
         // Sort and trim on node IDs first so only the visible rows ever
         // materialize path strings.
         return tree.childrenSortedForDisplay(of: node)
             .prefix(limit ?? Int.max)
-            .filter { tree.size(of: $0) > minVisibleSize }
+            .filter { child in
+                if tree.size(of: child) > Self.minVisibleSize { return true }
+                return isPartial && tree.isDirectory(child) && !tree.name(of: child).hasPrefix(".")
+            }
             // Rows are draggable into the Collector, so a row whose path can't
             // be derived is dropped rather than shown under a guessed one.
             // See SECURITY-REVIEW.md, finding L1.
