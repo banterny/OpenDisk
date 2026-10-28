@@ -280,75 +280,108 @@ final class ScanEngine: DiskScanning {
         // (Ported from upstream d987b27.)
         let startedAt = Date()
 
-        // The replay needs only the header's event ID, so it starts
-        // immediately — concurrent with the (much heavier) tree decode —
-        // instead of after it. Between them they are the pre-scan stretch
-        // where nothing is being counted; the phase marker lets the status
-        // bar say so instead of showing a dead "Scanning…".
-        // (Ported from upstream 999fae2.)
+        // Once the cached tree is on screen, the full traversal below must
+        // not replace it with its own partial snapshots: those start near
+        // empty and grow, so the window would shrink to nothing and refill.
+        // The cached tree stays up until the finished scan replaces it.
+        // (Ported from upstream 78f5f92.)
+        var showsCachedTree = false
+
         if let (header, fileBytes) = ScanCache.peek(forRoot: path) {
-            metrics.setPhase(.checkingChanges)
-            // Pure async suspension — no thread is blocked while the
-            // journal streams HistoryDone, bails, or times out.
-            async let pendingChanges = FSEventsChangeJournal.changes(
-                since: header.eventID, under: path,
-                timeout: replayTimeBudget(
-                    // The measured duration when there is one; otherwise the
-                    // old estimate from the cache file's size (~50 serialized
-                    // bytes per node, traversal reads ~200k nodes/s ⇒ ~10 MB
-                    // of cache per scan-second).
-                    expectedFullScanSeconds: header.fullScanSeconds > 0
-                        ? header.fullScanSeconds
-                        : Double(fileBytes) / 10_000_000
-                )
-            )
-            // Deserializing a saved tree is heavy: off the cooperative pool.
-            let cached = await offload { ScanCache.load(forRoot: path) }
-            if let cached, cached.tree.name(of: FileTree.rootID) == rootName {
-                // Show the previous scan instantly as the first partial
-                // snapshot, *before* the journal replay finishes — so a
-                // re-scan isn't a blank 0% while the journal streams. The
-                // full-scan fallback below re-registers under the same key if
-                // the replay turns out unreliable, replacing this.
-                let live = Mutex(cached.tree)
-                registerPartial { live.withLock { $0 } }
-                let changes = await pendingChanges
-                metrics.setPhase(changes == nil ? .scanning : .applyingChanges)
-                if let changes {
-                    // Splicing up to 40k changed directories is heavy work.
-                    let applied = await offload {
-                        IncrementalUpdater.apply(
-                            changes, to: live, rootPath: path,
-                            allowedDevices: allowedDevices,
-                            newInodesSince: cached.header.capturedAt,
-                            metrics: metrics, isCancelled: isCancelled
-                        )
-                    }
-                    if applied {
-                        let tree = live.withLock { $0 }
-                        // The status bar's final figure: the whole updated
-                        // tree, not just the folders re-read.
-                        // (Ported from upstream d13954d.)
-                        metrics.reset(
-                            bytes: tree.size(of: FileTree.rootID), items: tree.nodeCount
-                        )
-                        metrics.setPhase(.scanning)
-                        // An incremental update says nothing new about how
-                        // long a full traversal takes: carry the last
-                        // measurement forward rather than overwrite it with
-                        // this (much shorter) run.
-                        saveCacheInBackground(tree: tree, rootPath: path, header: ScanCache.Header(
-                            eventID: startEventID, capturedAt: startedAt,
-                            fullScanSeconds: header.fullScanSeconds
-                        ))
-                        return tree
-                    }
+            let cacheAge = startedAt.timeIntervalSince(header.capturedAt)
+            if cacheAge > maxReplayAge {
+                // Too old to replay: the journal would take longer to stream
+                // than a fresh traversal, so skip straight to one, showing the
+                // old tree meanwhile. The load is not awaited, so traversal
+                // starts at once; the read itself still runs on the offload
+                // queue — upstream does it in `Task.detached`, which would put
+                // a large blocking file read on the cooperative pool. If the
+                // load fails, this scan simply shows no partial results.
+                showsCachedTree = true
+                Task {
+                    let cached = await offload { ScanCache.load(forRoot: path) }
+                    guard let cached,
+                          cached.tree.name(of: FileTree.rootID) == rootName,
+                          !isCancelled()
+                    else { return }
+                    let snapshot = cached.tree
+                    registerPartial { snapshot }
                 }
             } else {
-                // Header parsed but the tree didn't (truncated file, format
-                // drift): drain the replay and full-scan.
-                _ = await pendingChanges
-                metrics.setPhase(.scanning)
+                // The replay needs only the header's event ID, so it starts
+                // immediately — concurrent with the (much heavier) tree
+                // decode — instead of after it. Between them they are the
+                // pre-scan stretch where nothing is being counted; the phase
+                // marker lets the status bar say so instead of showing a dead
+                // "Scanning…". (Ported from upstream 999fae2.)
+                metrics.setPhase(.checkingChanges)
+                // Pure async suspension — no thread is blocked while the
+                // journal streams HistoryDone, bails, or times out.
+                async let pendingChanges = FSEventsChangeJournal.changes(
+                    since: header.eventID, under: path,
+                    timeout: replayTimeBudget(
+                        // The measured duration when there is one; otherwise
+                        // the old estimate from the cache file's size (~50
+                        // serialized bytes per node, traversal reads ~200k
+                        // nodes/s ⇒ ~10 MB of cache per scan-second).
+                        expectedFullScanSeconds: header.fullScanSeconds > 0
+                            ? header.fullScanSeconds
+                            : Double(fileBytes) / 10_000_000
+                    )
+                )
+                // Deserializing a saved tree is heavy: off the cooperative pool.
+                let cached = await offload { ScanCache.load(forRoot: path) }
+                if let cached, cached.tree.name(of: FileTree.rootID) == rootName {
+                    // Show the previous scan instantly as the first partial
+                    // snapshot, *before* the journal replay finishes — so a
+                    // re-scan isn't a blank 0% while the journal streams.
+                    let live = Mutex(cached.tree)
+                    registerPartial { live.withLock { $0 } }
+                    showsCachedTree = true
+                    let changes = await pendingChanges
+                    metrics.setPhase(changes == nil ? .scanning : .applyingChanges)
+                    if let changes {
+                        // Splicing up to 40k changed directories is heavy work.
+                        let applied = await offload {
+                            IncrementalUpdater.apply(
+                                changes, to: live, rootPath: path,
+                                allowedDevices: allowedDevices,
+                                newInodesSince: cached.header.capturedAt,
+                                metrics: metrics, isCancelled: isCancelled
+                            )
+                        }
+                        if applied {
+                            let tree = live.withLock { $0 }
+                            // The status bar's final figure: the whole updated
+                            // tree, not just the folders re-read.
+                            // (Ported from upstream d13954d.)
+                            metrics.reset(
+                                bytes: tree.size(of: FileTree.rootID), items: tree.nodeCount
+                            )
+                            metrics.setPhase(.scanning)
+                            // An incremental update says nothing new about how
+                            // long a full traversal takes: carry the last
+                            // measurement forward rather than overwrite it with
+                            // this (much shorter) run.
+                            saveCacheInBackground(tree: tree, rootPath: path, header: ScanCache.Header(
+                                eventID: startEventID, capturedAt: startedAt,
+                                fullScanSeconds: header.fullScanSeconds
+                            ))
+                            return tree
+                        }
+                        // The update gave up part-way, leaving `live` half
+                        // spliced. Put the untouched cached tree back up for
+                        // the full scan, so what is on screen is one
+                        // consistent snapshot. (The fork's addition.)
+                        let pristine = cached.tree
+                        registerPartial { pristine }
+                    }
+                } else {
+                    // Header parsed but the tree didn't (truncated file, format
+                    // drift): drain the replay and full-scan.
+                    _ = await pendingChanges
+                    metrics.setPhase(.scanning)
+                }
             }
         }
 
@@ -361,11 +394,17 @@ final class ScanEngine: DiskScanning {
         // Full scan/traversal is the multi-second bulk: off the cooperative pool.
         let clock = ContinuousClock()
         let traversalStart = clock.now
+        let traversalPartials: @Sendable (@escaping PartialTreeProvider) -> Void
+        if showsCachedTree {
+            traversalPartials = { _ in }
+        } else {
+            traversalPartials = registerPartial
+        }
         let tree = await offload {
             traverse(
                 path: path, rootName: rootName, allowedDevices: allowedDevices,
                 metrics: metrics, isCancelled: isCancelled,
-                registerPartial: registerPartial
+                registerPartial: traversalPartials
             )
         }
         if !isCancelled() {
@@ -376,6 +415,11 @@ final class ScanEngine: DiskScanning {
         }
         return tree
     }
+
+    /// A cache older than this is not replayed: shown while a full scan
+    /// runs instead. Six hours is upstream's figure (78f5f92); past it the
+    /// journal backlog tends to cost more to stream than it saves.
+    private static let maxReplayAge: TimeInterval = 6 * 60 * 60
 
     /// How long the journal replay may run before the engine gives up and
     /// full-scans: half of what the full scan itself is expected to cost,
