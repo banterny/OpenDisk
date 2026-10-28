@@ -22,7 +22,12 @@ struct DiskAnalysisView: View {
     @State private var collector = Collector()
     @State private var isCollectorTargeted = false
     @State private var currentPath: String
-    @State private var breadcrumbs: [String] = []
+    /// Back goes up one level; this holds only what Forward can re-enter.
+    /// (Ported from upstream 01f7a8e, replacing the breadcrumb history.)
+    @State private var history = NavigationHistory()
+    /// The row to select once `currentPath` changes — the folder just
+    /// left, so going up keeps your place in the list as Finder does.
+    @State private var pendingFocus: String?
     @State private var hasInitiallyScanned = false
     @State private var searchText = ""
     @State private var searchPresented = false
@@ -39,6 +44,14 @@ struct DiskAnalysisView: View {
     /// Local key-down monitor behind every list shortcut (arrows, Quick
     /// Look, add to Collector…). See `handleKey`.
     @State private var keyMonitor: Any?
+    /// Local monitor for mouse side buttons and trackpad swipes (Back and
+    /// Forward). Like `keyMonitor` it sees only events already addressed to
+    /// this app — nothing is registered system-wide. See
+    /// `handleNavigationEvent`.
+    @State private var navigationMonitor: Any?
+    /// This screen's window, so gestures in other windows (Settings, the
+    /// Quick Look panel) are left alone.
+    @State private var windowNumber: Int?
     /// The user's shortcut assignments (Settings ▸ Keyboard Shortcuts).
     @State private var keyBindings = KeyBindingStore.shared
     /// Column sort for the directory list (search keeps its own relevance
@@ -69,6 +82,7 @@ struct DiskAnalysisView: View {
                 currentPath: currentPath,
                 rootPath: rootPath,
                 rootName: rootName,
+                sizeOfPath: analyzer.size(ofPath:),
                 onNavigate: navigateToPath
             )
 
@@ -130,6 +144,22 @@ struct DiskAnalysisView: View {
         .navigationSubtitle(windowSubtitle)
         .navigationBarBackButtonHidden()
         .toolbar {
+            // Browser-style Back and Forward. Back always goes up one level
+            // (it replaced the separate Enclosing Folder button); Forward
+            // re-enters what Back just left. (Ported from upstream 01f7a8e.)
+            ToolbarItem(placement: .navigation) {
+                ControlGroup {
+                    Button("Back", systemImage: "chevron.left", action: goBack)
+                        .keyboardShortcut("[", modifiers: .command)
+                        .disabled(parentPath == nil)
+                        .help("Go up one level (⌘[ or ⌘↑)")
+                    Button("Forward", systemImage: "chevron.right", action: goForward)
+                        .keyboardShortcut("]", modifiers: .command)
+                        .disabled(!history.canGoForward)
+                        .help("Go back into the folder you just left (⌘])")
+                }
+                .controlGroupStyle(.navigation)
+            }
             // Leaving the scan goes through here so it can confirm first:
             // dismissing drops the whole scan (and its cache-warm state).
             // (Ported from upstream d8728af.)
@@ -139,7 +169,8 @@ struct DiskAnalysisView: View {
                     systemImage: "eject",
                     action: requestUnmount
                 )
-                .keyboardShortcut("[", modifiers: .command)
+                // ⌘E, as in Finder's Eject; ⌘[ now belongs to Back.
+                .keyboardShortcut("e", modifiers: .command)
                 .help("Unmount and clear scan data")
                 .confirmationDialog(
                     "Unmount \(rootName)?",
@@ -151,12 +182,6 @@ struct DiskAnalysisView: View {
                 } message: {
                     Text("This clears the current scan data and returns to disk selection. It does not eject the disk from macOS.")
                 }
-            }
-            ToolbarItem(placement: .navigation) {
-                Button("Enclosing Folder", systemImage: "arrow.up", action: goToParent)
-                .keyboardShortcut(.upArrow, modifiers: .command)
-                .disabled(parentPath == nil)
-                .help("Go to the enclosing folder (⌘↑)")
             }
             ToolbarItem(placement: .primaryAction) {
                 Button("Refresh", systemImage: "arrow.clockwise", action: rescanFromTop)
@@ -173,6 +198,13 @@ struct DiskAnalysisView: View {
             if keyMonitor == nil {
                 keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
                     handleKey(event)
+                }
+            }
+            if navigationMonitor == nil {
+                navigationMonitor = NSEvent.addLocalMonitorForEvents(
+                    matching: [.otherMouseUp, .swipe, .scrollWheel]
+                ) { event in
+                    handleNavigationEvent(event)
                 }
             }
             guard !hasInitiallyScanned else { return }
@@ -205,6 +237,10 @@ struct DiskAnalysisView: View {
                 NSEvent.removeMonitor(keyMonitor)
                 self.keyMonitor = nil
             }
+            if let navigationMonitor {
+                NSEvent.removeMonitor(navigationMonitor)
+                self.navigationMonitor = nil
+            }
             quickLookURL = nil
             analyzer.cancelCurrentScan()
             scanAccess.endAccess(toPath: rootPath)
@@ -236,20 +272,24 @@ struct DiskAnalysisView: View {
         .onChange(of: currentPath) {
             selectedPaths.removeAll()
             selectionAnchor = nil
+            if let focus = pendingFocus {
+                pendingFocus = nil
+                // A synthetic "::" row anchors keyboard focus but is never
+                // selected, so it can't ride into a drag.
+                if !focus.hasPrefix("::") { selectedPaths = [focus] }
+                selectionAnchor = focus
+            }
         }
         // The analyzer owns the viewed path and can reset it to the scan
         // root when a fresh tree no longer contains the viewed folder
-        // (deleted, then ⌘R). Keep the breadcrumb trail in step so the
-        // title and path bar never show a folder the list has left.
+        // (deleted, then ⌘R). Keep the history in step so the title and
+        // path bar never show a folder the list has left.
         .onChange(of: analyzer.currentPath) { _, newPath in
             guard !newPath.isEmpty, newPath != currentPath else { return }
-            if let index = breadcrumbs.firstIndex(of: newPath) {
-                breadcrumbs.removeSubrange(index...)
-            } else {
-                breadcrumbs = []
-            }
+            history.didNavigate(to: newPath)
             currentPath = newPath
         }
+        .background(WindowNumberReader { windowNumber = $0 })
         // Make the Collector reachable from the row context menus in the list.
         .environment(collector)
         // ⌘Z pulls the last collected item back out of the Collector. Gated
@@ -258,6 +298,13 @@ struct DiskAnalysisView: View {
             Button("Undo Collect") { collector.undo() }
                 .keyboardShortcut("z", modifiers: .command)
                 .disabled(!collector.canUndo || searchPresented)
+                .opacity(0)
+                .accessibilityHidden(true)
+            // ⌘↑ keeps working as "up one level" now that the Enclosing
+            // Folder toolbar button has folded into Back.
+            Button("Enclosing Folder", action: goBack)
+                .keyboardShortcut(.upArrow, modifiers: .command)
+                .disabled(parentPath == nil)
                 .opacity(0)
                 .accessibilityHidden(true)
         }
@@ -425,7 +472,7 @@ struct DiskAnalysisView: View {
         case .openSelected:
             openFocusedItem()
         case .enclosingFolder:
-            goToParent()
+            goBack()
         case .addToCollector:
             collectSelection()
         case .quickLook:
@@ -724,7 +771,7 @@ struct DiskAnalysisView: View {
             CollectorBar(collector: collector, isTargeted: isCollectorTargeted) { _ in
                 // Files were removed — rescan the root and return to the top
                 // so the freed space is reflected immediately.
-                breadcrumbs = []
+                history.reset()
                 currentPath = rootPath
                 Task { await analyzer.scanDirectory(rootPath) }
             }
@@ -801,7 +848,7 @@ struct DiskAnalysisView: View {
     /// folder above it then needed a fresh scan to show again. The scan
     /// cache keeps a whole-root rescan quick. (Ported from upstream c59457a.)
     private func rescanFromTop() {
-        breadcrumbs = []
+        history.reset()
         currentPath = rootPath
         Task { await analyzer.scanDirectory(rootPath) }
     }
@@ -884,50 +931,102 @@ struct DiskAnalysisView: View {
 
     private func navigateToFolder(_ item: FolderItem) {
         guard item.isDirectory else { return }
-        guard showContents(of: item.path) else { return }
-        breadcrumbs.append(currentPath)
-        currentPath = item.path
-    }
-
-    private func goBack() {
-        guard let previousPath = breadcrumbs.last else { return }
-        guard showContents(of: previousPath) else { return }
-        breadcrumbs.removeLast()
-        currentPath = previousPath
+        navigateToPath(item.path)
     }
 
     /// The folder enclosing the one on screen, or nil at the scan root.
-    ///
-    /// Distinct from `goBack()`, which retraces the breadcrumb *history*:
-    /// after jumping deep via a search result or a chart ring, "back" and
-    /// "up" are different places. Never leaves the scan root — a parent that
-    /// falls outside it (and any synthetic "::" location, which has no
-    /// parent on disk) resolves to the root itself.
-    /// (Ported from upstream 59a83ec.)
+    /// Never leaves the scan root — see `NavigationHistory.parent`.
+    /// (Ported from upstream 59a83ec; moved into the model by 01f7a8e.)
     private var parentPath: String? {
-        guard currentPath != rootPath else { return nil }
-        if currentPath.hasPrefix("::") { return rootPath }
-        let parent = (currentPath as NSString).deletingLastPathComponent
-        guard parent.hasPrefix(rootPath.directoryPrefix) || parent == rootPath else { return rootPath }
-        return parent
+        NavigationHistory.parent(of: currentPath, root: rootPath)
     }
 
-    private func goToParent() {
+    /// Back: up one level, highlighting the folder we came from. (Before
+    /// upstream 01f7a8e, Back retraced the breadcrumb history and a
+    /// separate Enclosing Folder button went up; after a jump via search
+    /// or a chart ring those led to different places.)
+    private func goBack() {
         guard let parentPath else { return }
-        navigateToPath(parentPath)
+        guard showContents(of: parentPath) else { return }
+        history.didGoBack(from: currentPath)
+        pendingFocus = NavigationHistory.childLeading(to: currentPath, from: parentPath)
+            ?? (currentPath.hasPrefix("::") ? currentPath : nil)
+        currentPath = parentPath
+    }
+
+    /// Forward: re-enters the folder Back just left.
+    private func goForward() {
+        guard let target = history.forwardTarget, target != currentPath else { return }
+        guard showContents(of: target) else { return }
+        _ = history.goForward()
+        currentPath = target
     }
 
     private func navigateToPath(_ path: String) {
         guard path != currentPath else { return }
         guard showContents(of: path) else { return }
-        // Jumping via a breadcrumb can only go to an ancestor: rewind the
-        // back stack to it instead of appending, so Back stays coherent.
-        if let index = breadcrumbs.firstIndex(of: path) {
-            breadcrumbs.removeSubrange(index...)
-        } else {
-            breadcrumbs.append(currentPath)
-        }
+        history.didNavigate(to: path)
+        // Jumping up via a breadcrumb highlights the branch we came from.
+        pendingFocus = NavigationHistory.childLeading(to: currentPath, from: path)
         currentPath = path
+    }
+
+    /// Mouse side buttons and trackpad swipes: the same gestures Finder and
+    /// Safari use for Back and Forward. Returning nil swallows the event;
+    /// anything not ours is passed on untouched. Only this screen's window
+    /// is handled, and never while search results replace the list.
+    private func handleNavigationEvent(_ event: NSEvent) -> NSEvent? {
+        guard event.windowNumber == windowNumber, !isSearchActive else { return event }
+        switch event.type {
+        case .otherMouseUp:
+            switch event.buttonNumber {
+            case 3: goBack()
+            case 4: goForward()
+            default: return event
+            }
+            return nil
+        case .swipe:
+            if event.deltaX > 0 {
+                goBack()
+            } else if event.deltaX < 0 {
+                goForward()
+            } else {
+                return event
+            }
+            return nil
+        case .scrollWheel:
+            return trackTwoFingerSwipe(event) ? nil : event
+        default:
+            return event
+        }
+    }
+
+    /// A horizontal two-finger trackpad swipe, honoured only when the user
+    /// has "Swipe between pages" on (`isSwipeTrackingFromScrollEventsEnabled`)
+    /// and only when there is somewhere to go, so ordinary horizontal
+    /// scrolling is never stolen.
+    private func trackTwoFingerSwipe(_ event: NSEvent) -> Bool {
+        guard NSEvent.isSwipeTrackingFromScrollEventsEnabled,
+              event.phase == .began, event.hasPreciseScrollingDeltas,
+              abs(event.scrollingDeltaX) > abs(event.scrollingDeltaY)
+        else { return false }
+        let canGoBack = parentPath != nil
+        let canGoForward = history.canGoForward
+        // Swiping right (positive amount) goes back, swiping left forward.
+        if event.scrollingDeltaX > 0 ? !canGoBack : !canGoForward { return false }
+        var handled = false
+        event.trackSwipeEvent(
+            options: [.lockDirection, .clampGestureAmount],
+            dampenAmountThresholdMin: canGoForward ? -1 : 0,
+            max: canGoBack ? 1 : 0
+        ) { amount, phase, isComplete, _ in
+            guard phase == .ended, !handled else { return }
+            handled = true
+            MainActor.assumeIsolated {
+                if amount > 0 { goBack() } else if amount < 0 { goForward() }
+            }
+        }
+        return true
     }
 
     /// Serves the path from the scanned tree when possible. A path missing
@@ -942,6 +1041,36 @@ struct DiskAnalysisView: View {
         guard !analyzer.isScanning, !path.hasPrefix("::") else { return false }
         Task { await analyzer.scanDirectory(path) }
         return true
+    }
+}
+
+/// Reports the number of the window this view lands in, so the navigation
+/// monitor can ignore events addressed to any other window.
+private struct WindowNumberReader: NSViewRepresentable {
+    let onChange: (Int?) -> Void
+
+    func makeNSView(context: Context) -> ReaderView {
+        let view = ReaderView()
+        view.onChange = onChange
+        return view
+    }
+
+    func updateNSView(_ nsView: ReaderView, context: Context) {
+        nsView.onChange = onChange
+    }
+
+    final class ReaderView: NSView {
+        var onChange: ((Int?) -> Void)?
+
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            let number = window?.windowNumber
+            // Deferred: writing SwiftUI state during a view update is
+            // undefined behaviour.
+            DispatchQueue.main.async { [weak self] in
+                self?.onChange?(number)
+            }
+        }
     }
 }
 

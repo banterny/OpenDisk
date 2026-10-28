@@ -21,6 +21,9 @@ struct BreadcrumbBar: View {
     let rootPath: String
     /// Display name of the root segment (device name).
     let rootName: String
+    /// Size of the scanned folder at a path, shown after its segment; nil
+    /// hides it. (Ported from upstream 01f7a8e.)
+    var sizeOfPath: (String) -> Int64? = { _ in nil }
     let onNavigate: (String) -> Void
 
     /// Segments relative to the scanned root, so external volumes don't
@@ -82,18 +85,37 @@ struct BreadcrumbBar: View {
 
     @ViewBuilder
     private func segment(_ component: PathComponent) -> some View {
+        let size = sizeOfPath(component.path).map(ByteFormatter.formatFileSize)
         if component.isLast {
             // Current location: a label, not a control.
-            Text(component.name)
-                .font(.callout)
-                .fontWeight(.semibold)
-                .foregroundStyle(.primary)
-                .lineLimit(1)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
+            HStack(spacing: 5) {
+                Text(component.name)
+                    .fontWeight(.semibold)
+                    .foregroundStyle(.primary)
+                    .lineLimit(1)
+                if let size { BreadcrumbSize(text: size) }
+            }
+            .font(.callout)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
         } else {
-            BreadcrumbLink(name: component.name) { onNavigate(component.path) }
+            BreadcrumbLink(name: component.name, size: size) { onNavigate(component.path) }
         }
+    }
+}
+
+/// A segment's folder size: quiet, fixed-width digits that never truncate
+/// (the name beside it truncates first).
+private struct BreadcrumbSize: View {
+    let text: String
+
+    var body: some View {
+        Text(text)
+            .font(.caption)
+            .monospacedDigit()
+            .foregroundStyle(.tertiary)
+            .lineLimit(1)
+            .fixedSize()
     }
 }
 
@@ -101,23 +123,27 @@ struct BreadcrumbBar: View {
 /// rounded highlight on hover, like a Finder path-bar segment.
 private struct BreadcrumbLink: View {
     let name: String
+    var size: String? = nil
     let action: () -> Void
     @State private var hovering = false
 
     var body: some View {
         Button(action: action) {
-            Text(name)
-                .font(.callout)
-                .foregroundStyle(hovering ? .primary : .secondary)
-                .lineLimit(1)
-                .padding(.horizontal, 6)
-                .padding(.vertical, 3)
-                .background {
-                    if hovering {
-                        RoundedRectangle(cornerRadius: 5, style: .continuous)
-                            .fill(.quaternary)
-                    }
+            HStack(spacing: 5) {
+                Text(name)
+                    .foregroundStyle(hovering ? .primary : .secondary)
+                    .lineLimit(1)
+                if let size { BreadcrumbSize(text: size) }
+            }
+            .font(.callout)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 3)
+            .background {
+                if hovering {
+                    RoundedRectangle(cornerRadius: 5, style: .continuous)
+                        .fill(.quaternary)
                 }
+            }
         }
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
