@@ -546,15 +546,24 @@ struct FileTree: Sendable {
             directoryFlags[index] = node.isDirectory ? 1 : 0
         }
 
-        // Names: first pass records lengths and the blob's total size so
-        // the blob is appended into preallocated storage.
+        // Names: gathered into one byte buffer up front, recording each
+        // length on the way. Appending each name's UTF-8 view to `Data`
+        // separately cost a bounds check and a possible reallocation per
+        // name, which dominated saving a multi-million-node tree. The bytes
+        // written are identical. (Ported from upstream 6b60c02.)
         var nameLengths = [UInt32](repeating: 0, count: count)
-        var blobLength = 0
+        var nameBlob = [UInt8]()
+        nameBlob.reserveCapacity(count * 16)
         for index in 0..<count {
-            let length = names[index].utf8.count
-            nameLengths[index] = UInt32(length)
-            blobLength += length
+            // `withUTF8` is mutating (it may first make a bridged string
+            // contiguous), hence the local copy.
+            var name = names[index]
+            name.withUTF8 { bytes in
+                nameLengths[index] = UInt32(bytes.count)
+                nameBlob.append(contentsOf: bytes)
+            }
         }
+        let blobLength = nameBlob.count
 
         var data = Data(capacity: count * 29 + blobLength + 16)
         func append<T>(_ value: T) {
@@ -575,9 +584,7 @@ struct FileTree: Sendable {
         appendArray(directoryFlags)
         appendArray(nameLengths)
         append(UInt32(blobLength))
-        for name in names {
-            data.append(contentsOf: name.utf8)
-        }
+        appendArray(nameBlob)
 
         // Hard-link records, appended after the name blob: the link section
         // is what lets a cached tree keep inode identity across launches,
