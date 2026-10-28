@@ -44,6 +44,20 @@ struct CollectorBar: View {
         RoundedRectangle(cornerRadius: 16, style: .continuous)
     }
 
+    /// The footer is a rounder capsule than the floating panels.
+    /// (Ported from upstream f8365ae.)
+    private var footerShape: RoundedRectangle {
+        RoundedRectangle(cornerRadius: 22, style: .continuous)
+    }
+
+    /// Empty and idle: the footer shrinks to its hint rather than spanning
+    /// the pane. The drop target is the whole pane either way (see
+    /// `InAppFileDropTarget` in `DiskAnalysisView`), so this changes
+    /// nothing about where a drop lands. (Ported from upstream f8365ae.)
+    private var isCompact: Bool {
+        phase == .idle && collector.isEmpty && !collecting && !rejecting
+    }
+
     /// Whether the pointer (or an active drag) currently wants the list open.
     /// Drives `listVisible` through a short close delay so crossing the small
     /// gap between the footer and the floating list doesn't collapse it.
@@ -164,16 +178,16 @@ struct CollectorBar: View {
     private var footerBar: some View {
         GlassEffectContainer {
             footerContent
-                .frame(maxWidth: .infinity)
+                .frame(maxWidth: isCompact ? nil : .infinity)
                 .padding(.horizontal, 14)
                 .padding(.vertical, 10)
                 .glassEffect(
                     rejecting ? .regular.tint(.red)
                         : (collecting ? .regular.tint(.accentColor) : .regular),
-                    in: shape
+                    in: footerShape
                 )
                 .overlay {
-                    shape.strokeBorder(
+                    footerShape.strokeBorder(
                         rejecting ? Color.red : (collecting ? Color.accentColor : .clear),
                         lineWidth: 1.5
                     )
@@ -201,11 +215,13 @@ struct CollectorBar: View {
         HStack(spacing: 8) {
             Image(systemName: "nosign")
             Text(collector.draggedProtectedReason ?? "This item can’t be deleted")
-                .lineLimit(2)
+                .lineLimit(3)
         }
         .font(.callout)
         .fontWeight(.semibold)
-        .foregroundStyle(.red)
+        // Primary on the red-tinted glass: red text on red read poorly.
+        // (Ported from upstream ba6672d; three lines from ab868c6.)
+        .foregroundStyle(.primary)
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.vertical, 2)
     }
@@ -228,32 +244,36 @@ struct CollectorBar: View {
                 collector.endDragOut(operation: operation)
             }
             Spacer()
+            // Liquid Glass prominent button (upstream f8365ae; its pre-macOS
+            // 26 capsule fallback is not taken). The label still names what
+            // will happen — upstream's always reads "Delete" — and it only
+            // opens the confirmation below. (H1)
             Button {
                 showConfirm = true
             } label: {
                 Text(deletePermanently ? "Delete" : "Move to Trash")
                     .fontWeight(.semibold)
-                    .foregroundStyle(.white)
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 6)
-                    .background(Color(nsColor: .systemRed), in: Capsule())
             }
-            .buttonStyle(.plain)
+            .buttonStyle(.glassProminent)
+            .tint(.red)
             .disabled(collector.isEmpty)
         }
     }
 
     /// Shown when nothing is collected yet: the persistent drop-target hint,
-    /// which lights up while a drag is hovering.
+    /// which lights up while a drag is hovering. Shorter wording now that
+    /// the footer is compact; the tooltip keeps the full sentence.
+    /// (Ported from upstream f8365ae and ba6672d.)
     private var hintView: some View {
         HStack(spacing: 8) {
             Image(systemName: collecting ? "arrow.down.circle.fill" : "arrow.down.circle.dotted")
-            Text(collecting ? "Release to collect" : "Drag files here to collect them for deletion")
+            Text(collecting ? "Release to collect" : "Drop files to collect")
         }
         .font(.callout)
-        .fontWeight(collecting ? .semibold : .regular)
-        .foregroundStyle(collecting ? Color.accentColor : Color.secondary)
-        .frame(maxWidth: .infinity)
+        .fontWeight(collecting ? .semibold : .medium)
+        .foregroundStyle(.primary)
+        .frame(maxWidth: collecting ? .infinity : nil)
+        .help("Drag files or folders here to stage them for deletion")
         .padding(.vertical, 2)
     }
 
@@ -356,7 +376,10 @@ struct CollectorBar: View {
             Text(text).lineLimit(2)
         }
         .font(.callout)
-        .foregroundStyle(.orange)
+        // Primary on orange-tinted glass, as with the red rejection.
+        // (Ported from upstream ba6672d.)
+        .fontWeight(.medium)
+        .foregroundStyle(.primary)
         .padding(.horizontal, 14)
         .padding(.vertical, 10)
         .frame(maxWidth: .infinity, alignment: .leading)

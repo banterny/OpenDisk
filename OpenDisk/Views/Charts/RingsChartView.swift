@@ -23,6 +23,13 @@ struct RingsChartView: View {
     @State private var layout: RingsChartLayout.Layout?
     @State private var hoveredPath: String?
     @State private var hoverLocation: CGPoint = .zero
+    /// The square side the current `layout` was built for. While the pane
+    /// is being resized the old layout is scaled to the new size, and only
+    /// rebuilt once resizing pauses — rebuilding the whole sunburst on
+    /// every frame of a sidebar animation or divider drag stuttered.
+    /// (Ported from upstream d2958b7.)
+    @State private var layoutSide: CGFloat = 0
+    @State private var resizeTask: Task<Void, Never>?
 
     var body: some View {
         GeometryReader { geometry in
@@ -31,9 +38,11 @@ struct RingsChartView: View {
             // pane's full rectangle) means resizing the pane along its
             // longer side changes nothing and costs no relayout — only a
             // change of `side` rebuilds the layout. (Ported from upstream
-            // 628985d.)
+            // 628985d.) Hover, click and drag points are divided by `scale`
+            // to land in the layout's own coordinates.
             let side = min(geometry.size.width, geometry.size.height).rounded(.down)
-            let square = CGSize(width: side, height: side)
+            let renderSide = layoutSide > 0 ? layoutSide : side
+            let scale = renderSide > 0 ? side / renderSide : 1
             ZStack {
                 if let layout {
                     StaticChartLayer(layout: layout)
@@ -43,13 +52,16 @@ struct RingsChartView: View {
                     }
                 }
             }
+            .frame(width: renderSide, height: renderSide)
+            .scaleEffect(scale)
             .frame(width: side, height: side)
             .contentShape(Rectangle())
             .onContinuousHover { phase in
                 switch phase {
                 case .active(let location):
-                    hoverLocation = location
-                    hoveredPath = layout?.segment(at: location)?.path
+                    let point = CGPoint(x: location.x / scale, y: location.y / scale)
+                    hoverLocation = point
+                    hoveredPath = layout?.segment(at: point)?.path
                 case .ended:
                     hoveredPath = nil
                 }
@@ -59,7 +71,8 @@ struct RingsChartView: View {
             // same fix the folder rows use.
             .simultaneousGesture(
                 SpatialTapGesture().onEnded { value in
-                    guard let segment = layout?.segment(at: value.location) else { return }
+                    let point = CGPoint(x: value.location.x / scale, y: value.location.y / scale)
+                    guard let segment = layout?.segment(at: point) else { return }
                     if segment.depth == 0 {
                         onSelectCenter()
                     } else if segment.kind == .directory {
@@ -72,7 +85,8 @@ struct RingsChartView: View {
             // segment is looked up at the gesture's start point rather than
             // from hover state, which can lag a fast press-and-drag.
             .fileDrag { location in
-                draggableSegment(at: location).map { [collectedFile(for: $0)] } ?? []
+                let point = CGPoint(x: location.x / scale, y: location.y / scale)
+                return draggableSegment(at: point).map { [collectedFile(for: $0)] } ?? []
             } onBegin: { files in
                 collector.flagDraggedProtected(protectedReason(for: files))
             } onEnd: { _ in
@@ -93,17 +107,33 @@ struct RingsChartView: View {
                 accessibilitySegmentList
             }
             .onChange(of: root, initial: true) {
-                layout = RingsChartLayout.layout(root: root, in: square, freeBytes: freeBytes)
+                relayout(side: side)
             }
             .onChange(of: freeBytes) {
-                layout = RingsChartLayout.layout(root: root, in: square, freeBytes: freeBytes)
+                relayout(side: renderSide)
             }
-            .onChange(of: side) {
-                layout = RingsChartLayout.layout(root: root, in: square, freeBytes: freeBytes)
+            // 120 ms after the last size change.
+            .onChange(of: side) { _, newSide in
+                resizeTask?.cancel()
+                resizeTask = Task { @MainActor in
+                    try? await Task.sleep(for: .milliseconds(120))
+                    guard !Task.isCancelled else { return }
+                    relayout(side: newSide)
+                }
             }
             // Fill the pane so the square is centred in it.
             .frame(width: geometry.size.width, height: geometry.size.height)
         }
+    }
+
+    /// Rebuilds the layout for a square of `side` points and records the
+    /// side it was built for, which the body scales from.
+    private func relayout(side: CGFloat) {
+        guard side > 0 else { return }
+        layoutSide = side
+        layout = RingsChartLayout.layout(
+            root: root, in: CGSize(width: side, height: side), freeBytes: freeBytes
+        )
     }
 
     // MARK: - Accessibility

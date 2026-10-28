@@ -14,8 +14,17 @@ struct PathComponent: Identifiable {
 /// root to the current folder. Ancestors are subtle, clickable text that
 /// brighten with a soft highlight on hover; the current folder is plain,
 /// prominent text. No accent-filled pills — this reads like a native macOS
-/// path bar, not a row of buttons. Returning to the disk list is the
-/// toolbar's system back button; the trail only jumps to an ancestor.
+/// path bar, not a row of buttons. The trail only jumps within the scan;
+/// changing location is the sidebar's job.
+///
+/// It sits at the top of the list, above the column titles, and above
+/// search results too, where clicking any segment — the current folder
+/// included — leaves search for that folder. (Upstream 3a09ac2.)
+///
+/// Upstream also collapses the trail into shorter variants when space runs
+/// out (ab868c6, building on 368eef2's `ViewThatFits` layout, which the
+/// fork did not take). This bar scrolls sideways instead, so it keeps every
+/// segment and every size.
 struct BreadcrumbBar: View {
     let currentPath: String
     let rootPath: String
@@ -85,20 +94,27 @@ struct BreadcrumbBar: View {
 
     @ViewBuilder
     private func segment(_ component: PathComponent) -> some View {
-        let size = sizeOfPath(component.path).map(ByteFormatter.formatFileSize)
         if component.isLast {
-            // Current location: a label, not a control.
+            // Current location: prominent text, no hover treatment. Its
+            // size is in the window subtitle, so it is not repeated here.
+            // (Upstream 3a6951d.) Still clickable — with search up, that
+            // is the way back to this folder. (Upstream 3a09ac2.)
             HStack(spacing: 5) {
                 Text(component.name)
                     .fontWeight(.semibold)
                     .foregroundStyle(.primary)
                     .lineLimit(1)
-                if let size { BreadcrumbSize(text: size) }
+                    .truncationMode(.middle)
             }
             .font(.callout)
             .padding(.horizontal, 6)
             .padding(.vertical, 3)
+            .contentShape(Rectangle())
+            .onTapGesture { onNavigate(component.path) }
+            .accessibilityAddTraits(.isButton)
+            .accessibilityAction(.default) { onNavigate(component.path) }
         } else {
+            let size = sizeOfPath(component.path).map(ByteFormatter.formatFileSize)
             BreadcrumbLink(name: component.name, size: size) { onNavigate(component.path) }
         }
     }

@@ -61,11 +61,15 @@ struct DiskAnalysisView: View {
     @State private var sort: SortField = .size
     @State private var sortAscending = false
     private let totalUsedDiskSpace: Int64
-    /// Live capacity of the volume under `rootPath`, shown in the status
-    /// bar; re-read when a scan ends so deletions and the like show up.
-    /// (Ported from upstream d628684.)
+    /// Live capacity of the volume under `rootPath`, for the chart's
+    /// free-space wedge; re-read when a scan ends so deletions and the like
+    /// show up. (Ported from upstream d628684. It also fed a capacity
+    /// readout in the status bar, which the redesign removed.)
     @State private var volumeCapacity: VolumeCapacity?
     @AppStorage(FreeSpaceInfo.defaultsKey) private var showFreeSpace = true
+    /// Whether the inspector (chart and Collector) is shown; remembered.
+    /// (Ported from upstream 3a6951d.)
+    @AppStorage("inspector_visible") private var showInspector = true
     /// Whether `rootPath` is a volume's root rather than a folder on one;
     /// only then is the volume's free space part of the picture.
     /// (Ported from upstream 3a6951d.)
@@ -90,70 +94,22 @@ struct DiskAnalysisView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            BreadcrumbBar(
-                currentPath: currentPath,
-                rootPath: rootPath,
-                rootName: rootName,
-                sizeOfPath: analyzer.size(ofPath:),
-                onNavigate: navigateToPath
-            )
-
-            if !analyzer.rootItems.isEmpty {
-                // The split starts at 60% list / 40% chart (ideal widths
-                // seed HSplitView's initial divider position); the divider
-                // stays user-draggable.
-                // Read here, not inside the geometry closure, which runs off
-                // the main actor. (Upstream dc6e1c8.)
-                let detailMinWidth = listScale.scaled(FileColumns.detailMinWidth)
-                GeometryReader { geometry in
-                    HSplitView {
-                        listPane
-                            .frame(
-                                minWidth: 320,
-                                idealWidth: geometry.size.width * 0.6,
-                                maxWidth: .infinity, maxHeight: .infinity
-                            )
-                            .onGeometryChange(for: Bool.self) {
-                                $0.size.width >= detailMinWidth
-                            } action: { listIsWide = $0 }
-
-                        chartPane
-                            .frame(
-                                minWidth: 280,
-                                idealWidth: geometry.size.width * 0.4,
-                                maxWidth: .infinity, maxHeight: .infinity
-                            )
-                    }
-                }
-                ScanStatusBar(
-                    isScanning: analyzer.isScanning,
-                    phase: analyzer.scanPhase,
-                    progressFraction: progressFraction,
-                    scannedBytes: analyzer.totalDiskScannedBytes,
-                    itemsScanned: analyzer.itemsScanned,
-                    scanStartDate: analyzer.scanStartDate,
-                    scanDuration: analyzer.scanDuration,
-                    totalBytes: analyzer.displayedTotalBytes,
-                    itemCount: analyzer.rootItems.count,
-                    volumeCapacity: volumeCapacity
-                )
-            } else if analyzer.isScanning {
-                // Only visible for the moments before the skeleton lands.
-                Spacer()
-                ProgressView("Preparing scan…")
-                Spacer()
-            } else {
-                Spacer()
-                emptyStateView
-                Spacer()
+        // The list column, and the inspector (chart plus Collector) beside
+        // it, which ⌥⌘I hides. (Ported from upstream 3a6951d; the path bar
+        // moved into the list's header in 3a09ac2.)
+        HSplitView {
+            mainColumn
+                .frame(minWidth: 340, idealWidth: 600, maxWidth: .infinity, maxHeight: .infinity)
+            if showInspector {
+                inspectorPane
+                    .frame(minWidth: 280, idealWidth: 400, maxWidth: .infinity, maxHeight: .infinity)
             }
         }
         // The window's own frame (set on the split view) does the sizing.
         .frame(minHeight: 480, maxHeight: .infinity)
-        // Native window title + subtitle: the folder currently shown and its
-        // size, updating as you navigate (like Finder). The path bar below is
-        // the interactive trail.
+        // Native window title + subtitle: the folder currently shown, its
+        // size and item count, updating as you navigate (like Finder). The
+        // path bar above the list is the interactive trail.
         .navigationTitle(windowTitle)
         .navigationSubtitle(windowSubtitle)
         .toolbar {
@@ -177,6 +133,17 @@ struct DiskAnalysisView: View {
                 Button("Refresh", systemImage: "arrow.clockwise", action: rescanFromTop)
                 .keyboardShortcut("r", modifiers: .command)
                 .help("Rescan from the top level")
+            }
+            // Shows or hides the chart and Collector. Only a layout switch:
+            // hiding it removes the drop target with it, and collecting
+            // anything (⌘⌫, the row menu) brings it back — see the
+            // `collector.count` handler below. (Ported from upstream 3a6951d.)
+            ToolbarItem(placement: .primaryAction) {
+                Button("Inspector", systemImage: "sidebar.right") {
+                    showInspector.toggle()
+                }
+                .keyboardShortcut("i", modifiers: [.command, .option])
+                .help(showInspector ? "Hide Inspector (⌥⌘I)" : "Show Inspector (⌥⌘I)")
             }
         }
         .onAppear {
@@ -207,7 +174,7 @@ struct DiskAnalysisView: View {
             scanAccess.beginAccess(toPath: rootPath)
             Task { await analyzer.scanDirectory(rootPath) }
         }
-        // Volume capacity for the status bar. Polled, not read once: free
+        // Volume capacity for the free-space wedge. Polled, not read once: free
         // space moves while the window just sits there (macOS reclaiming
         // purgeable space, other apps writing), and a figure that only
         // refreshed when a scan ended drifted visibly from Finder's
@@ -249,15 +216,6 @@ struct DiskAnalysisView: View {
                 Task { await analyzer.scanDirectory(rootPath) }
             }
         }
-        // HIG (macOS): search lives at the trailing side of the toolbar.
-        // Search starts immediately on typing — the index answers in
-        // milliseconds, so there is no debounce.
-        .searchable(
-            text: $searchText,
-            isPresented: $searchPresented,
-            placement: .toolbar,
-            prompt: "Search scanned files and folders"
-        )
         .onChange(of: searchText) {
             analyzer.updateSearch(query: searchText, scope: .all)
             // The visible list is about to change wholesale; a selection
@@ -285,6 +243,13 @@ struct DiskAnalysisView: View {
             history.didNavigate(to: newPath)
             currentPath = newPath
         }
+        // The Collector must be on screen whenever it holds something: an
+        // item collected by keyboard or menu with the inspector hidden
+        // would otherwise vanish from the list into a tray the user cannot
+        // see (or empty). (The fork's addition.)
+        .onChange(of: collector.count) { old, new in
+            if new > old, !showInspector { showInspector = true }
+        }
         .background(WindowNumberReader { windowNumber = $0 })
         // Make the Collector reachable from the row context menus in the list.
         .environment(collector)
@@ -311,6 +276,54 @@ struct DiskAnalysisView: View {
                 .disabled(parentPath == nil)
                 .opacity(0)
                 .accessibilityHidden(true)
+        }
+    }
+
+    // MARK: - List column
+
+    /// The list (or search results) over the status bar, or a placeholder
+    /// before the first rows arrive.
+    @ViewBuilder
+    private var mainColumn: some View {
+        // Read here, not inside the geometry closure, which runs off the
+        // main actor. (Upstream dc6e1c8.)
+        let detailMinWidth = listScale.scaled(FileColumns.detailMinWidth)
+        VStack(spacing: 0) {
+            if !analyzer.rootItems.isEmpty {
+                listPane
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .onGeometryChange(for: Bool.self) {
+                        $0.size.width >= detailMinWidth
+                    } action: { listIsWide = $0 }
+                    // HIG (macOS): search lives at the trailing side of the
+                    // toolbar. Search starts immediately on typing — the
+                    // index answers in milliseconds, so there is no
+                    // debounce. Offered once there is something to search.
+                    .searchable(
+                        text: $searchText,
+                        isPresented: $searchPresented,
+                        placement: .toolbar,
+                        prompt: "Search"
+                    )
+                ScanStatusBar(
+                    isScanning: analyzer.isScanning,
+                    phase: analyzer.scanPhase,
+                    stepsCompleted: analyzer.scanStepsCompleted,
+                    stepsTotal: analyzer.scanStepsTotal,
+                    progressFraction: progressFraction,
+                    scannedBytes: analyzer.totalDiskScannedBytes,
+                    itemsScanned: analyzer.itemsScanned,
+                    scanStartDate: analyzer.scanStartDate,
+                    scanDuration: analyzer.scanDuration
+                )
+            } else if analyzer.isScanning {
+                // Only visible for the moments before the skeleton lands.
+                ProgressView("Preparing scan…")
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            } else {
+                emptyStateView
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
     }
 
@@ -381,22 +394,26 @@ struct DiskAnalysisView: View {
         let kindWidth = FileColumns.kindWidth(for: items, scale: listScale)
         Group {
             if isSearchActive {
-                SearchResultsView(
-                    items: items,
-                    resultsVersion: analyzer.searchResultsVersion,
-                    totalMatches: analyzer.searchTotalMatches,
-                    isRunning: analyzer.isSearchRunning,
-                    resultsArePartial: analyzer.searchResultsArePartial,
-                    query: searchText,
-                    selectedPaths: selectedPaths,
-                    focusedPath: selectionAnchor,
-                    showsDetailColumns: showsDetailColumns,
-                    kindWidth: kindWidth,
-                    selectionFiles: selectionFiles(in: items),
-                    onQuickLook: quickLook,
-                    onSelect: selectRow,
-                    onOpen: openRow
-                )
+                VStack(spacing: 0) {
+                    pathBar
+                    Divider()
+                    SearchResultsView(
+                        items: items,
+                        resultsVersion: analyzer.searchResultsVersion,
+                        totalMatches: analyzer.searchTotalMatches,
+                        isRunning: analyzer.isSearchRunning,
+                        resultsArePartial: analyzer.searchResultsArePartial,
+                        query: searchText,
+                        selectedPaths: selectedPaths,
+                        focusedPath: selectionAnchor,
+                        showsDetailColumns: showsDetailColumns,
+                        kindWidth: kindWidth,
+                        selectionFiles: selectionFiles(in: items),
+                        onQuickLook: quickLook,
+                        onSelect: selectRow,
+                        onOpen: openRow
+                    )
+                }
             } else {
                 ScanResultsView(
                     items: items,
@@ -410,7 +427,10 @@ struct DiskAnalysisView: View {
                     onSelect: selectRow,
                     onOpen: openRow
                 ) {
-                    columnHeader(kindWidth: kindWidth)
+                    VStack(spacing: 0) {
+                        pathBar
+                        columnHeader(kindWidth: kindWidth)
+                    }
                 }
                 // A fresh list per folder, so it opens scrolled to the
                 // focused row rather than wherever the last folder was.
@@ -655,6 +675,19 @@ struct DiskAnalysisView: View {
 
     private var showsDetailColumns: Bool { listIsWide }
 
+    /// The breadcrumb trail, at the top of the list and of search results.
+    /// Any segment leaves search. (Ported from upstream 3a09ac2.)
+    private var pathBar: some View {
+        BreadcrumbBar(
+            currentPath: currentPath,
+            rootPath: rootPath,
+            rootName: rootName,
+            sizeOfPath: analyzer.size(ofPath:),
+            onNavigate: { navigateLeavingSearch(to: $0) }
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     /// Column titles laid out on the rows' own grid (`FileColumns`), so
     /// they line up at every text size. The size bar's column has no
     /// title, as in Finder. (Ported from upstream 3a6951d and 4574ad8.)
@@ -770,31 +803,44 @@ struct DiskAnalysisView: View {
         navigateToPath(destination)
     }
 
-    // MARK: - Chart pane
+    // MARK: - Inspector (chart and Collector)
 
     @ViewBuilder
-    private var chartPane: some View {
+    private var inspectorPane: some View {
         VStack(spacing: 0) {
             Group {
                 if let chartRoot = analyzer.chartRoot {
                     RingsChartView(
                         root: chartRoot,
                         freeBytes: chartFreeBytes,
-                        onSelectDirectory: navigateToPath,
-                        onSelectCenter: goBack
+                        onSelectDirectory: { navigateLeavingSearch(to: $0) },
+                        onSelectCenter: {
+                            exitSearch()
+                            goBack()
+                        }
                     )
-                } else {
+                } else if analyzer.isScanning || !analyzer.rootItems.isEmpty {
                     // The chart needs hierarchy; during the skeleton phase
                     // (before the first scan snapshot) there is none yet.
-                    ProgressView("Building chart…")
+                    ProgressView()
+                        .controlSize(.small)
                         .frame(maxWidth: .infinity, maxHeight: .infinity)
+                } else {
+                    // Empty or unreadable location: the list column says why.
+                    Color.clear
                 }
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
             .padding(8)
-
-            // Collapsed collector sits distinctly under the graph (in layout);
-            // its expanded file list floats up over the graph (see CollectorBar).
+            // Room for the Collector footer, which floats over the bottom
+            // of the pane rather than taking a row of its own, so the
+            // chart keeps its size as the footer changes height.
+            // (Ported from upstream fb76404.)
+            .padding(.bottom, Self.collectorReservedHeight)
+        }
+        // The collector's expanded file list floats up over the graph (see
+        // CollectorBar).
+        .overlay(alignment: .bottom) {
             CollectorBar(collector: collector, isTargeted: isCollectorTargeted) { _ in
                 // Files were removed — rescan the root and return to the top
                 // so the freed space is reflected immediately.
@@ -818,11 +864,13 @@ struct DiskAnalysisView: View {
         }
     }
 
+    private static let collectorReservedHeight: CGFloat = 64
+
     /// Free space to draw on the chart, or nil for no wedge. Only at the
     /// scan root, and only when that root is a volume: deeper down — or in
     /// a scanned folder — the ring shows one folder, and "free space on the
     /// disk" is not a part of a folder. Uses `available` (free plus
-    /// purgeable), so the wedge agrees with the status bar and with Finder.
+    /// purgeable), so the wedge agrees with the sidebar and with Finder.
     private var chartFreeBytes: Int64? {
         guard showFreeSpace, isVolumeRoot, currentPath == rootPath,
               let capacity = volumeCapacity, capacity.available > 0
@@ -907,11 +955,15 @@ struct DiskAnalysisView: View {
         return (currentPath as NSString).lastPathComponent
     }
 
-    /// The size of what's on screen, shown beside the title once known.
+    /// The size and item count of what's on screen, beside the title once
+    /// known (they used to sit in the status bar). (Ported from upstream
+    /// 3a6951d.)
     private var windowSubtitle: String {
-        analyzer.displayedTotalBytes > 0
-            ? ByteFormatter.formatFileSize(analyzer.displayedTotalBytes)
-            : ""
+        guard analyzer.displayedTotalBytes > 0 else {
+            return analyzer.isScanning ? "Scanning…" : ""
+        }
+        let count = analyzer.rootItems.count
+        return "\(ByteFormatter.formatFileSize(analyzer.displayedTotalBytes)) · \(count.formatted()) \(count == 1 ? "item" : "items")"
     }
 
     // MARK: - Empty state
@@ -988,6 +1040,22 @@ struct DiskAnalysisView: View {
         guard showContents(of: target) else { return }
         _ = history.goForward()
         currentPath = target
+    }
+
+    /// Closes search, if it is up. A no-op otherwise, so callers need not
+    /// check.
+    private func exitSearch() {
+        guard isSearchActive || searchPresented else { return }
+        searchPresented = false
+        searchText = ""
+    }
+
+    /// Navigation from the path bar or the chart: those stay visible over
+    /// search results, and using them means "take me there", so search
+    /// closes first. (Ported from upstream 3a6951d.)
+    private func navigateLeavingSearch(to path: String) {
+        exitSearch()
+        navigateToPath(path)
     }
 
     private func navigateToPath(_ path: String) {
