@@ -159,9 +159,9 @@ struct DiskAnalysisView: View {
                 .help("Go to the enclosing folder (⌘↑)")
             }
             ToolbarItem(placement: .primaryAction) {
-                Button("Refresh", systemImage: "arrow.clockwise", action: refresh)
+                Button("Refresh", systemImage: "arrow.clockwise", action: rescanFromTop)
                 .keyboardShortcut("r", modifiers: .command)
-                .help("Rescan the current folder")
+                .help("Rescan from the top level")
             }
         }
         .onAppear {
@@ -794,12 +794,16 @@ struct DiskAnalysisView: View {
         return true
     }
 
-    private func refresh() {
-        // Refreshing inside the synthetic purgeable view rescans the disk
-        // it belongs to.
-        Task {
-            await analyzer.scanDirectory(currentPath.hasPrefix("::") ? rootPath : currentPath)
-        }
+    /// Refresh rescans the whole scan root and returns to the top, rather
+    /// than rescanning only the folder on screen. `scanDirectory` replaces
+    /// the analyzer's tree with one rooted at whatever path it is given, so
+    /// refreshing a subfolder used to discard the rest of the disk: every
+    /// folder above it then needed a fresh scan to show again. The scan
+    /// cache keeps a whole-root rescan quick. (Ported from upstream c59457a.)
+    private func rescanFromTop() {
+        breadcrumbs = []
+        currentPath = rootPath
+        Task { await analyzer.scanDirectory(rootPath) }
     }
 
     /// Fraction of the device's used space scanned so far, or nil (an
