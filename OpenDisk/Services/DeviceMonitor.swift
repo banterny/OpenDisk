@@ -20,6 +20,13 @@ final class DeviceMonitor {
     /// restart. These are ordinary in-process notifications from
     /// NSWorkspace; they need no permission and observe nothing beyond
     /// volume events. (Ported from upstream a5bd938.)
+    ///
+    /// Also whenever OpenDisk itself comes to the front, so the sidebar's
+    /// free-space figures catch up with whatever was done in other apps.
+    /// Upstream fb76404 instead re-reads every 3 seconds and on *any*
+    /// app's activation (`NSWorkspace.didActivateApplicationNotification`,
+    /// which tells this app what else the user switches to). Neither is
+    /// taken: this app's own activation is enough for the purpose.
     private func observeVolumeChanges() {
         let center = NSWorkspace.shared.notificationCenter
         let names = [
@@ -35,13 +42,26 @@ final class DeviceMonitor {
                 }
             }
         }
+        volumeObservers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                Task { await self.refresh() }
+            }
+        })
     }
 
     /// Rebuilds the device list from the currently mounted volumes.
+    ///
+    /// Only an actual change is published: an unchanged list re-rendering
+    /// the sidebar on every refresh would reset hover and redraw for
+    /// nothing. (Ported from upstream fb76404.)
     func refresh() async {
-        devices = await Task.detached(priority: .utility) {
+        let current = await Task.detached(priority: .utility) {
             Self.currentDevices()
         }.value
+        if current != devices { devices = current }
     }
 
     // MARK: - Enumeration (off the main actor)

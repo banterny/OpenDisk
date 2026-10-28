@@ -3,20 +3,23 @@ import QuickLook
 import QuickLookUI
 import SwiftUI
 
-/// Analysis screen for one disk (pushed from the disk picker): scans it,
-/// streams results live, and hosts breadcrumb navigation through them —
+/// Analysis of one location (the detail column beside the sidebar): scans
+/// it, streams results live, and hosts breadcrumb navigation through them —
 /// a split view with the folder list on the left and the rings chart on
 /// the right, both updating as the scan runs.
 ///
-/// Navigation chrome makes leaving the scan explicit: an unmount button
-/// confirms before returning to the disk picker and clearing the scan data.
-/// Refresh lives in the toolbar, and the breadcrumb path bar sits in the
-/// content layer with no custom background.
+/// Leaving a location is a click on another in the sidebar; the Unmount
+/// button that used to lead back to a disk picker went with the picker.
+/// (Upstream 3a6951d.) Refresh lives in the toolbar, and the breadcrumb
+/// path bar sits in the content layer with no custom background.
 struct DiskAnalysisView: View {
     let rootPath: String
     let rootName: String
+    /// Called when a scan ends with something to show (not an empty or
+    /// Full-Disk-Access-blocked result); the window collapses the sidebar.
+    /// (Ported from upstream d2958b7.)
+    let onScanFinished: () -> Void
 
-    @Environment(\.dismiss) private var dismiss
     @Environment(ScanAccess.self) private var scanAccess
     @State private var analyzer = DiskAnalyzer()
     @State private var collector = Collector()
@@ -31,7 +34,6 @@ struct DiskAnalysisView: View {
     @State private var hasInitiallyScanned = false
     @State private var searchText = ""
     @State private var searchPresented = false
-    @State private var isShowingUnmountConfirmation = false
     /// Multi-selection (shift-click ranges, ⌘-click toggles) across the
     /// visible list, keyed by path like everything else. A drag from any
     /// selected row carries the whole selection to the Collector.
@@ -64,14 +66,20 @@ struct DiskAnalysisView: View {
     /// (Ported from upstream d628684.)
     @State private var volumeCapacity: VolumeCapacity?
     @AppStorage(FreeSpaceInfo.defaultsKey) private var showFreeSpace = true
+    /// Whether `rootPath` is a volume's root rather than a folder on one;
+    /// only then is the volume's free space part of the picture.
+    /// (Ported from upstream 3a6951d.)
+    @State private var isVolumeRoot = false
 
     init(
         rootPath: String,
         rootName: String = "Computer",
-        totalUsedSpace: Int64 = 0
+        totalUsedSpace: Int64 = 0,
+        onScanFinished: @escaping () -> Void = {}
     ) {
         self.rootPath = rootPath
         self.rootName = rootName
+        self.onScanFinished = onScanFinished
         self.totalUsedDiskSpace = totalUsedSpace
         self._currentPath = State(initialValue: rootPath)
     }
@@ -130,19 +138,13 @@ struct DiskAnalysisView: View {
                 Spacer()
             }
         }
-        // With window resizability tracking content size, these bounds
-        // expand the window when this screen is pushed and let the user
-        // resize it freely.
-        .frame(
-            minWidth: 900, idealWidth: 1100, maxWidth: .infinity,
-            minHeight: 600, idealHeight: 720, maxHeight: .infinity
-        )
+        // The window's own frame (set on the split view) does the sizing.
+        .frame(minHeight: 480, maxHeight: .infinity)
         // Native window title + subtitle: the folder currently shown and its
         // size, updating as you navigate (like Finder). The path bar below is
-        // the interactive trail; unmounting returns to the disk list.
+        // the interactive trail.
         .navigationTitle(windowTitle)
         .navigationSubtitle(windowSubtitle)
-        .navigationBarBackButtonHidden()
         .toolbar {
             // Browser-style Back and Forward. Back always goes up one level
             // (it replaced the separate Enclosing Folder button); Forward
@@ -159,29 +161,6 @@ struct DiskAnalysisView: View {
                         .help("Go back into the folder you just left (⌘])")
                 }
                 .controlGroupStyle(.navigation)
-            }
-            // Leaving the scan goes through here so it can confirm first:
-            // dismissing drops the whole scan (and its cache-warm state).
-            // (Ported from upstream d8728af.)
-            ToolbarItem(placement: .navigation) {
-                Button(
-                    "Unmount",
-                    systemImage: "eject",
-                    action: requestUnmount
-                )
-                // ⌘E, as in Finder's Eject; ⌘[ now belongs to Back.
-                .keyboardShortcut("e", modifiers: .command)
-                .help("Unmount and clear scan data")
-                .confirmationDialog(
-                    "Unmount \(rootName)?",
-                    isPresented: $isShowingUnmountConfirmation,
-                    titleVisibility: .visible
-                ) {
-                    Button("Unmount", role: .destructive, action: unmount)
-                    Button("Cancel", role: .cancel) {}
-                } message: {
-                    Text("This clears the current scan data and returns to disk selection. It does not eject the disk from macOS.")
-                }
             }
             ToolbarItem(placement: .primaryAction) {
                 Button("Refresh", systemImage: "arrow.clockwise", action: rescanFromTop)
@@ -209,6 +188,8 @@ struct DiskAnalysisView: View {
             }
             guard !hasInitiallyScanned else { return }
             hasInitiallyScanned = true
+            isVolumeRoot = (try? URL(fileURLWithPath: rootPath)
+                .resourceValues(forKeys: [.isVolumeKey]))?.isVolume ?? false
             // Sandboxed (App Store) build: hold security-scoped access to the
             // granted root for as long as this screen — and its scans — is up.
             // A no-op in the non-sandboxed website build.
@@ -230,7 +211,11 @@ struct DiskAnalysisView: View {
             }
         }
         .onChange(of: analyzer.isScanning) { _, isScanning in
-            if !isScanning { Task { await refreshVolumeCapacity() } }
+            guard !isScanning else { return }
+            Task { await refreshVolumeCapacity() }
+            if !analyzer.rootItems.isEmpty, !analyzer.needsFullDiskAccess {
+                onScanFinished()
+            }
         }
         .onDisappear {
             if let keyMonitor {
@@ -412,14 +397,6 @@ struct DiskAnalysisView: View {
                 $0.path.hasPrefix("::") ? nil : URL(fileURLWithPath: $0.path)
             }
         )
-    }
-
-    private func requestUnmount() {
-        isShowingUnmountConfirmation = true
-    }
-
-    private func unmount() {
-        dismiss()
     }
 
     // MARK: - Keyboard shortcuts
@@ -792,11 +769,12 @@ struct DiskAnalysisView: View {
     }
 
     /// Free space to draw on the chart, or nil for no wedge. Only at the
-    /// scan root: deeper down the ring shows one folder, and "free space on
-    /// the disk" is not a part of a folder. Uses `available` (free plus
+    /// scan root, and only when that root is a volume: deeper down — or in
+    /// a scanned folder — the ring shows one folder, and "free space on the
+    /// disk" is not a part of a folder. Uses `available` (free plus
     /// purgeable), so the wedge agrees with the status bar and with Finder.
     private var chartFreeBytes: Int64? {
-        guard showFreeSpace, currentPath == rootPath,
+        guard showFreeSpace, isVolumeRoot, currentPath == rootPath,
               let capacity = volumeCapacity, capacity.available > 0
         else { return nil }
         return capacity.available
@@ -1075,7 +1053,9 @@ private struct WindowNumberReader: NSViewRepresentable {
 }
 
 #Preview {
-    NavigationStack {
+    NavigationSplitView {
+        EmptyView()
+    } detail: {
         DiskAnalysisView(rootPath: "/", totalUsedSpace: 500_000_000_000)
     }
 }

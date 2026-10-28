@@ -17,9 +17,10 @@ struct OpenDiskApp: App {
                 .onAppear(perform: checkFullDiskAccessAtStartup)
         }
         .windowToolbarStyle(.unified)
-        // The window tracks each screen's content size: compact around the
-        // disk picker, expanding when the analysis screen is pushed.
-        .windowResizability(.contentSize)
+        // The content sets a minimum size only; the user sizes the window
+        // freely above it. (`.contentSize` suited the old compact disk
+        // picker, which the window shrank to fit. Upstream 3a6951d.)
+        .windowResizability(.contentMinSize)
         .commands {
             ToolbarCommands()
         }
