@@ -653,7 +653,8 @@ Not ported:
   the cache with `Task.detached`, i.e. a large blocking file read on Swift's
   cooperative thread pool, which `ScanEngine` keeps free by routing blocking
   work through `offload`. Portable only with that changed; deferred with
-  the redesign it belongs to.
+  the redesign it belongs to. (Ported later with that change; see
+  "Upstream ports (Oct 2026, redesign)" below.)
 - `3a6951d` and its follow-ups (`f8365ae`, `e1a40b4`, `dc6e1c8`, `d13954d`,
   `ba6672d`, `fb76404`, `ab868c6`, `3a09ac2`, `d7faff5`, `90c12c6`,
   `59d87ab`, `d2958b7`, `71d09de`, `4574ad8`) — the v1.4 window redesign
@@ -663,7 +664,9 @@ Not ported:
   action is Reveal in Finder. Deferred as a product decision: every commit
   conflicts, `ab868c6` changes an existing test's expected value
   (`"1:05"` → `"1 min 5 sec"`), `d7faff5` starts a whole-disk scan at every
-  launch, and `fb76404` re-reads the device list every 3 seconds.
+  launch, and `fb76404` re-reads the device list every 3 seconds. (Ported
+  later, with those three points settled; see "Upstream ports (Oct 2026,
+  redesign)" below.)
 - `868ff2c`, `815fef1`, `13501d4`, `98bce73`, `368eef2`, `0d296b5` — macOS
   14/15 and Xcode 16 support. The fork is pinned to macOS 26; `868ff2c` also
   swaps `Synchronization` for a hand-rolled lock and edits two existing tests.
@@ -690,3 +693,123 @@ Not verified by hand: the gestures and the hover fix themselves (mouse side
 buttons, swipes, a quick drop followed by a return to the list), and the
 chart in dark mode. The test suite (115 tests, 10 new for navigation) covers
 the navigation model and every pre-existing behaviour, not live input.
+
+---
+
+## 🔄 Upstream ports (Oct 2026, redesign)
+
+The v1.4 window redesign and `78f5f92`, deferred in the second review above,
+were ported on 28 October 2026 with three adjustments the user chose: the
+launch-time scan (`d7faff5`) is an opt-in setting, off by default; the
+3-second device-list polling (`fb76404`) is left out; and the one edit to an
+existing test (`FormattersTests`, `"1:05"` → `"1 min 5 sec"`) was approved.
+
+Ported by hand from upstream's end state rather than commit by commit. The
+intermediate states add things that later commits in the same series remove
+again (`SelectionSummary.swift`, `StorageOverview.swift`,
+`DiskAnalyzer.fileCount`), so replaying them would have meant writing code
+only to delete it. The table maps each upstream commit to where it landed.
+Upstream's own commit messages were not reused (several carry AI
+`Co-Authored-By` trailers), and no `project.pbxproj` hunk was taken.
+
+| Fork | Upstream | What | Adaptation |
+|---|---|---|---|
+| `b636192` | `ab868c6` (non-UI) | Capacities under 1 GB in MB; durations as "1 min 5 sec"; equal-sized names sort as Finder does | raw comparison as a final tie-break, so the order stays total |
+| `9fb0baa` | `d13954d` (non-UI) | "n of total" steps while journal changes are spliced in; counters restart before a full traversal | `IncrementalUpdater.apply` stays inside `offload` |
+| `f55c446` | `e1a40b4`, `59d87ab` | Same-location rescans keep the old rows and chart up; partial results hide noise; chart built off the main actor | a waiting chart rebuild is dropped when the chart is set outright |
+| `a9d7240` | `78f5f92` | A cache over 6 hours old is shown during a full rescan instead of replayed | loaded through `offload`, not `Task.detached`; the untouched cached tree replaces a half-spliced one. As upstream, if that old cache fails to load, the scan shows only the skeleton until it finishes |
+| `85e2ba8` | `3a6951d`, `d2958b7`, `e1a40b4`, `f8365ae`, `dc6e1c8`, `fb76404`, `ab868c6` | Sidebar of disks and folders replaces the disk picker and Unmount | guided placeholder kept; device list refreshes on this app's activation, not on a timer |
+| `d104908` | `3a6951d`, `71d09de`, `4574ad8`, `59d87ab`, `dc6e1c8` (`90c12c6` superseded by `71d09de`) | Finder-style list (Name, Size, bar, Kind); click selects, double-click opens; text size ⌘+ ⌘= ⌘− ⌘0 | macOS 26 path only; search rows' first menu item says "Open" |
+| `fda6fcf` | `3a6951d`, `3a09ac2`, `d2958b7`, `fb76404`, `f8365ae`, `ba6672d`, `ab868c6`, `d13954d` | Hideable inspector (chart and Collector); path bar above the list; status bar trimmed; Collector restyle; chart resizes smoothly | inspector reopens when anything is collected; Delete keeps "Move to Trash" label; path bar still scrolls; status bar drops upstream's always-empty leading slot and keeps 5 pt of vertical padding |
+| `84b34c5` | `d7faff5` | Scan a location at launch | **opt-in, off by default**; read once per window; skipped when hosting tests |
+
+Not ported:
+
+- `fb76404`'s 3-second refresh loop, and its observer of *every* app's
+  activation (`NSWorkspace.didActivateApplicationNotification`, which tells
+  the app what else the user switches to). The device list refreshes on mount,
+  unmount and rename, as before, and when OpenDisk itself becomes active.
+- `FileTree.descendantFileCount` and `DiskAnalyzer.fileCount` (`e1a40b4`),
+  with their `FileTreeTests` test. The only caller was removed again in
+  `d2958b7`, and the new walk follows sibling chains with no bound, the
+  hang that invariant 7 exists to prevent (M1).
+- `SelectionSummary.swift` (`3a6951d`, removed by `d2958b7`) and
+  `StorageOverview.swift` (`3a09ac2`, removed by `d7faff5`).
+- Every `#if compiler(>=6.2)` / pre-macOS 26 branch (the pinned-section list
+  header, the capsule Delete button).
+- `ab868c6`'s collapsing breadcrumb variants, which build on `368eef2`'s
+  `ViewThatFits` layout (not ported). The fork's path bar scrolls sideways.
+- `FileKind.isPackage`, defined upstream but never called.
+- Upstream's analysis view still refreshes on
+  `FileDragSource.filesMovedNotification` (from before v1.3.1). That only
+  matters when a drag out of the app *moves* a file, which this fork forbids
+  (invariant 6), so there is nothing to react to.
+
+Security-relevant consequences of what *was* ported:
+
+- **No new deletion path.** The new actions are: sidebar "Show in Finder"
+  (reveal only); sidebar "Remove from Sidebar" (forgets a saved path, or in the
+  App Store build a bookmark: `removeGrant` ends its security-scoped access,
+  and the analysis view's own `endAccess` is then a no-op; nothing on disk is
+  touched); "Scan Folder…" (now a `fileImporter`, website build only; adds a
+  path); the row menu's "Open" / "Quick Look" and double-click (navigate or
+  preview); a clickable current breadcrumb (navigation, leaves search); the
+  Inspector toggle (layout); the text-size commands (one preference). The
+  restyled Collector button still only opens the existing confirmation, which
+  runs `deleteAll` with the per-item `ProtectedPaths` re-check and Trash by
+  default (H1).
+- **No new drag path.** Sidebar rows cannot be dragged. List rows and chart
+  rings still go through `.fileDrag` and `FileDragSource` (copy-only outside
+  the app, invariant 6), and `InAppFileDropTarget` (H4) still sits over the
+  inspector pane alone. `FileDrag.swift`, `Collector.swift` and
+  `ProtectedPaths.swift` are unchanged by this port.
+- **Hiding the inspector hides the Collector.** Upstream lets ⌘⌫ or the row
+  menu collect into a tray that is off screen; the rows just vanish from the
+  list. The fork reopens the inspector whenever the Collector grows, so
+  anything queued for deletion is always visible beside its Delete button.
+- **Rows can be older than before.** A same-location rescan keeps the
+  previous rows up until new data arrives, including rows for files just
+  deleted, and a cache over 6 hours old stays on screen for a whole full scan
+  (previously only until the replay or traversal replaced it). Those rows can
+  be collected. The consequences are bounded by what already exists: the
+  confirmation, the `ProtectedPaths` re-check before each removal, Trash by
+  default, and a vanished path failing and being reported. Sizes shown in the
+  Collector remain scan-time figures (residual risk, first bullet).
+- **No blocking I/O moved onto the cooperative pool.** The stale cache read
+  goes through `offload`. The chart build moved to a detached task, but it is
+  computation on an in-memory tree, with no file access.
+- **Launch reads nothing new by default.** With the setting off (the
+  default) launch lists devices, as before, and scans nothing; the last
+  location is not recorded. With it on, launch never shows an access panel,
+  never opens an external volume, and never runs inside the test host.
+- **New preferences**, all plain UserDefaults values shared with the test
+  host: `sidebar_folders` (website build: paths of added folders),
+  `inspector_visible`, `list_text_size_level`, `scan_at_launch`, and
+  `last_location` (only while `scan_at_launch` is on). No new network code,
+  no `Process`, no new entitlement or permission.
+- **Shortcuts.** ⌘E is free again (Unmount went with the disk picker). New:
+  ⌥⌘I (inspector), ⌘+ / ⌘= / ⌘− / ⌘0 (text size). The configurable list
+  shortcuts are unchanged.
+- **The free-space wedge** is now drawn only when the scan root is a volume;
+  a scanned folder used to show the whole disk's free space as part of itself.
+
+Tests: 127 (118 before). New: upstream's `capacities` and two `DiskAnalyzer`
+tests (keep results while rescanning; partial-result noise), plus the fork's
+Finder-order test, a `ScanMetrics` step-counter test and four
+`LaunchLocation` tests (the default is off; last internal location, else the
+startup disk; never an external volume; never a location needing a prompt).
+Each failed against the pre-port code: the two `DiskAnalyzer` tests, the
+Finder-order test and the duration cases by assertion, `capacities` by
+assertion against a stub `formatCapacity` (so the file compiled), and the
+`ScanMetrics` and `LaunchLocation` tests by not compiling against the old
+API. The one edited test is the approved
+`FormattersTests` duration case. `78f5f92` has no test: exercising it end to
+end means writing into the app's real cache directory, whose pruning could
+evict the user's own caches.
+
+Not verified by hand: the whole redesigned window. In particular a row drag
+to the Collector alongside the new double-click; the sidebar collapsing when
+a scan finishes; hiding the inspector and collecting with ⌘⌫; text size; the
+launch setting both ways; the sandboxed build's padlocks and grant panel from
+the sidebar; and the stale-cache display on a rescan after more than six
+hours.

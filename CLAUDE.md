@@ -8,7 +8,7 @@ written the way they are, and the reasoning is not obvious from the code alone.
 ## Commands
 
 ```bash
-# Tests (118). Run these before and after any change.
+# Tests (127). Run these before and after any change.
 xcodebuild test -scheme OpenDisk -destination 'platform=macOS' \
   CODE_SIGNING_ALLOWED=NO -only-testing:OpenDiskTests
 
@@ -101,6 +101,12 @@ Each one is a fixed finding. Reintroducing any of them re-opens a real hole.
   `XCTestConfigurationFilePath`). If a run ever sits at 0% CPU after
   `Executed 0 tests`, look for that alert first. Never tick its "don't ask
   again": the preference is shared with the installed app.
+- Every preference is shared that way, including the redesign's
+  (`sidebar_folders`, `inspector_visible`, `list_text_size_level`,
+  `scan_at_launch`, `last_location`). Anything that acts on a preference at
+  launch must also check `FullDiskAccess.isHostingTests()`; the optional scan
+  at launch does, or turning it on in the installed app would start a
+  whole-disk scan on every test run.
 - `xcodebuild` cannot run inside Claude Code's sandbox (it needs to write
   DerivedData under `~/Library`); the build fails with "Operation not
   permitted" before compiling anything.
@@ -116,15 +122,25 @@ Read the diff first — that is the whole point of the fork, since there is no
 updater to do it for you. Watch in particular for anything reintroducing
 Sparkle, `MoveToApplications`, `removeItem` as the deletion default, string
 comparison in `ProtectedPaths`, `.move` in the drag operation mask, or `async`
-on the scanner's blocking calls. Re-run the tests after any merge.
+on the scanner's blocking calls. Also for `Task.detached` around blocking
+file I/O (upstream reads the scan cache that way; the fork uses `offload`),
+polling timers (upstream re-reads the device list every 3 seconds), and
+anything that starts a scan at launch unasked (here it is an opt-in setting,
+off by default). Re-run the tests after any merge.
 
 In practice a merge is not workable: upstream stripped its comments and the
 fork kept them, so nearly every hunk conflicts. What has worked is
 `git cherry-pick -n <commit>` one commit at a time, restoring
 `OpenDisk.xcodeproj` and `OpenDisk-Info.plist` from `HEAD` after each, then
 reading every hunk. Last reviewed upstream commit: `0d296b5` (v1.4.3 plus a
-README tweak). The v1.4 window redesign was reviewed but not ported; see
-the Oct 2026 (second review) section of `SECURITY-REVIEW.md` before starting it.
+README tweak). Everything up to there that the fork wants is ported,
+including the v1.4 window redesign; the "Upstream ports" sections of
+`SECURITY-REVIEW.md` list what was left out and why.
+
+For a large upstream series, porting from the end state worked better than
+replaying commits: the redesign's commits add files and functions that later
+commits in the same series delete again. Map each upstream commit to a fork
+commit in the review notes so the history stays traceable.
 
 Use `git cherry-pick -n` (or hand-port) and write your own commit message:
 several upstream commits carry `Co-Authored-By` trailers for an AI tool,
