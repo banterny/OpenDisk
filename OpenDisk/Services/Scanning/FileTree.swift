@@ -240,7 +240,11 @@ struct FileTree: Sendable {
     /// never shuffle equal-sized rows. The list and the chart both use
     /// this, keeping their orders identical by construction.
     func childrenSortedForDisplay(of id: NodeID) -> [NodeID] {
-        children(of: id).sorted {
+        sortedForDisplay(children(of: id))
+    }
+
+    func sortedForDisplay(_ ids: [NodeID]) -> [NodeID] {
+        ids.sorted {
             let (a, b) = (size(of: $0), size(of: $1))
             return a == b ? name(of: $0) < name(of: $1) : a > b
         }

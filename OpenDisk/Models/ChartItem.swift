@@ -73,13 +73,30 @@ struct ChartItem: Equatable, Identifiable, Sendable {
         let isDirectory = tree.isDirectory(node)
         let totalSize = tree.size(of: node)
         let parentSize = max(totalSize, 1)
-        let hasChildren = isDirectory && tree.childCount(of: node) > 0
+        let childIDs = isDirectory ? tree.children(of: node) : []
+        let hasChildren = !childIDs.isEmpty
         var children: [ChartItem] = []
         var cursor = 0.0
 
         if hasChildren && depth < maxDepth {
             let prefix = path.directoryPrefix
-            for child in tree.childrenSortedForDisplay(of: node) {
+            // Drop children too small to draw *before* sorting: a folder
+            // of 100,000 small files used to sort all of them on every
+            // snapshot, only for the loop below to stop at the first
+            // invisible one. The byte threshold is the `minVisibleFraction`
+            // test below solved for size, rounded down, so it only ever
+            // lets through extra children, which that test still rejects;
+            // the chart is unchanged. `fractionOfRoot` is never zero here
+            // (1 at the root, and a child is only built once it passed
+            // that test), so the division is finite and at most
+            // `parentSize`. (Ported from upstream c1ddf4d.)
+            let smallestVisible = max(
+                Int64((minVisibleFraction / fractionOfRoot * Double(parentSize)).rounded(.down)), 1
+            )
+            let visibleIDs = tree.sortedForDisplay(
+                childIDs.filter { tree.size(of: $0) >= smallestVisible }
+            )
+            for child in visibleIDs {
                 let childSize = tree.size(of: child)
                 guard childSize > 0 else { break }
                 let share = Double(childSize) / Double(parentSize) * 100
