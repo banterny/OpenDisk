@@ -107,9 +107,12 @@ Each one is a fixed finding. Reintroducing any of them re-opens a real hole.
   launch must also check `FullDiskAccess.isHostingTests()`; the optional scan
   at launch does, or turning it on in the installed app would start a
   whole-disk scan on every test run.
-- `xcodebuild` cannot run inside Claude Code's sandbox (it needs to write
-  DerivedData under `~/Library`); the build fails with "Operation not
-  permitted" before compiling anything.
+- Run `xcodebuild` outside Claude Code's sandbox. Inside it, a test run was
+  seen to log "Operation not permitted" on a CoreSimulator log file under
+  `~/Library/Logs` and then stop with "Testing cancelled because the build
+  failed". The likely cause is that it cannot write its build folders under
+  `~/Library` (DerivedData), but the actual build error was not read, so
+  that is not confirmed.
 
 ## Syncing from upstream
 
